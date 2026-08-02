@@ -1,0 +1,58 @@
+import { getBookingByCancelToken } from "@/lib/bookings";
+import { getEventType } from "@/lib/event-types";
+import { getSettings } from "@/lib/settings";
+import { buildIcs } from "@/lib/ics";
+
+export const dynamic = "force-dynamic";
+
+/**
+ * The canonical .ics for a booking, keyed by its cancel token.
+ *
+ * Served from the server rather than generated in the browser so the UID and
+ * SEQUENCE are stable: re-downloading updates the event already in someone's
+ * calendar instead of adding a second copy, and a cancelled booking emits a
+ * CANCEL that withdraws it.
+ */
+export async function GET(
+  _request: Request,
+  context: { params: Promise<{ token: string }> },
+) {
+  const { token } = await context.params;
+  const booking = await getBookingByCancelToken(token);
+  if (!booking) {
+    return new Response("not found", { status: 404 });
+  }
+
+  const [eventType, settings] = await Promise.all([
+    getEventType(booking.eventTypeId),
+    getSettings(),
+  ]);
+
+  const title = eventType?.title ?? "meeting";
+  const location =
+    eventType?.locationDetail || eventType?.location || settings.defaultLocation;
+
+  const ics = buildIcs({
+    uid: `${booking.id}@coffee.justin06lee.dev`,
+    start: booking.startAt,
+    end: booking.endAt,
+    title: `${title} with ${settings.hostName}`,
+    description: booking.notes
+      ? `${eventType?.blurb ?? ""}\n\nnote from ${booking.guestName}: ${booking.notes}`.trim()
+      : (eventType?.blurb ?? ""),
+    location,
+    organizerName: settings.hostName,
+    attendeeName: booking.guestName,
+    attendeeEmail: booking.guestEmail,
+    cancelled: booking.status === "cancelled",
+  });
+
+  return new Response(ics, {
+    headers: {
+      "content-type": "text/calendar; charset=utf-8",
+      "content-disposition": `attachment; filename="${title.replace(/[^a-z0-9]+/gi, "-")}.ics"`,
+      // The token is a capability; a shared cache must never hold the response.
+      "cache-control": "private, no-store",
+    },
+  });
+}
