@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useMemo, useState } from "react";
+import { useActionState, useMemo, useState, useSyncExternalStore } from "react";
 import { Clock, MapPin, User } from "lucide-react";
 import { bookSlot, type BookFormState } from "@/app/actions";
 import { Button } from "@/components/chrome/button";
@@ -62,22 +62,25 @@ export function BookingFlow({
   hostTimeZone,
   slots,
 }: BookingFlowProps) {
-  // Starts as the host's zone so the server and client render the same markup;
-  // the guest's real zone lands in an effect after mount. Guessing during
-  // render would read the *server's* zone and mismatch on hydration.
-  const [timeZone, setTimeZone] = useState(hostTimeZone);
-  const [zoneReady, setZoneReady] = useState(false);
+  // The guest's zone is a value the server and client legitimately disagree
+  // about, which is exactly what useSyncExternalStore's two snapshots are for:
+  // the server renders the host's zone, the client swaps in the browser's on
+  // hydration. Guessing during render would read the *server's* zone; doing it
+  // in an effect would work but costs a second render and a "ready" flag.
+  const detectedTimeZone = useSyncExternalStore(
+    subscribeToNothing,
+    guessTimeZone,
+    () => hostTimeZone,
+  );
+  const [chosenTimeZone, setChosenTimeZone] = useState<string | null>(null);
+  const timeZone = chosenTimeZone ?? detectedTimeZone;
+
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
   const [state, formAction, pending] = useActionState<BookFormState, FormData>(
     bookSlot,
     { error: null },
   );
-
-  useEffect(() => {
-    setTimeZone(guessTimeZone());
-    setZoneReady(true);
-  }, []);
 
   // Days in the displayed zone, each holding the instants that fall on it.
   const days = useMemo(() => {
@@ -162,7 +165,7 @@ export function BookingFlow({
           <TimezoneSelect
             label="times shown in"
             value={timeZone}
-            onChange={setTimeZone}
+            onChange={setChosenTimeZone}
             className="max-w-xs"
           />
 
@@ -186,11 +189,9 @@ export function BookingFlow({
               value={selectedSlot}
               onChange={setSelectedSlot}
               columns={3}
-              footnote={
-                zoneReady
-                  ? `${eventType.durationMin} minutes, ${timeZone.replace(/_/g, " ").toLowerCase()}`
-                  : undefined
-              }
+              footnote={`${eventType.durationMin} minutes, ${timeZone
+                .replace(/_/g, " ")
+                .toLowerCase()}`}
             />
           ) : null}
         </>
@@ -272,6 +273,15 @@ export function BookingFlow({
       ) : null}
     </div>
   );
+}
+
+/**
+ * The browser's zone can't change mid-session, so the store has nothing to
+ * subscribe to. useSyncExternalStore still requires a subscribe function, and
+ * it must be stable — an inline arrow would resubscribe on every render.
+ */
+function subscribeToNothing(): () => void {
+  return () => {};
 }
 
 function longDayLabel(instant: number | undefined, timeZone: string): string {
