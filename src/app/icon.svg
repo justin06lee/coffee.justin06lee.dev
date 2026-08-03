@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <title>coffee — cup and saucer</title>
+  <rect width="32" height="32" fill="#000000"/>
+  <path d="M5 9h14v12H5z" fill="none" stroke="#ffffff" stroke-width="2"/>
+  <rect x="7" y="13" width="10" height="2" fill="#ffffff"/>
+  <path d="M19 13h6v6h-6" fill="none" stroke="#ffffff" stroke-width="2"/>
+  <rect x="3" y="24" width="24" height="2" fill="#ffffff"/>
+</svg>
