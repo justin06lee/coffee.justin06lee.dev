@@ -12,32 +12,46 @@ Glyphs are rects rather than <text>. A favicon is rendered in a context where
 font availability isn't guaranteed, and a missing monospace face would leave an
 empty disc; rect geometry always draws.
 
+Everything here is tuned for 16px, not for the 136px artboard. At a tab's real
+size the ascii texture is gone — a 30x30 grid averages to under one cell per
+pixel — so the only things that survive are the silhouette and the large-scale
+light-to-dark structure. That drives three choices below: a wide tonal range
+(the first pass sat in a narrow grey band and averaged to a smudge), a rim term
+that traces the outline, and a handle fat enough to keep its hole open.
+
     python3 design/favicon/generate.py > src/app/icon.svg
 """
 import math
 import sys
 
-N = 34                  # cells across
+N = 30                  # cells across
 VIEW = 136.0            # viewBox units
 CELL = VIEW / N
 DISC = 0.97             # black disc radius, normalised
 LEVELS = 11             # 1..11; 0 is empty, mirroring the ramp's leading space
-SCALE = 1.22            # world units across the disc radius
+SCALE = 1.14            # world units across the disc radius; lower zooms in
 # The handle only sticks out on one side, so the silhouette has to be
 # re-centred or the cup sits visibly left of the disc's middle.
-U_OFFSET = 0.30
+U_OFFSET = 0.36
 
 CUP_R = 0.72            # cup radius in world units
 CUP_H = 0.54            # half-height
 WALL = 0.10             # rim thickness, so the coffee sits inside a lip
-HANDLE_R = 0.36         # handle ring radius
-HANDLE_T = 0.10         # handle tube radius
+# The handle is what says "cup" rather than "canister", and it is the first
+# thing to go when the mark is downsampled. It is deliberately fatter and held
+# further off the body than proportion alone would suggest, so that the hole
+# through it stays open at 16px instead of silting up into a solid nub.
+HANDLE_R = 0.46         # handle ring radius
+HANDLE_T = 0.13         # handle tube radius
 
 PITCH = math.radians(24)   # looking down onto the cup
 YAW = math.radians(-17)    # turned so the handle reads in silhouette
 # Deliberately not straight down: a vertical light leaves a cylinder wall
 # almost unshaded, which is what made the first pass read flat.
 LIGHT = (-0.55, 0.42, -0.72)
+
+RIM = 0.58              # how much the silhouette edge is lifted
+RIM_FALLOFF = 2.0       # higher confines the lift to a thinner outline
 
 
 def norm(v):
@@ -122,16 +136,23 @@ def trace(u, v):
         if d < 0.002:
             n = normal_at(p)
             lambert = max(0.0, sum(n[i] * LIGHT[i] for i in range(3)))
+            # Cells whose normal has turned away from the camera are the ones
+            # sitting on the silhouette. Lifting them draws the cup's outline
+            # in bright glyphs, and an outline is the one feature that reads
+            # after the texture has averaged itself away at tab size.
+            facing = abs(sum(n[i] * direction[i] for i in range(3)))
+            lambert = min(1.0, lambert + RIM * (1.0 - min(1.0, facing)) ** RIM_FALLOFF)
             if material == COFFEE:
                 # Darker and flatter than the ceramic — it should read as
                 # liquid sitting inside the cup, not as more of the cup.
                 return 0.11 + 0.30 * lambert
-            # Ambient term keeps the unlit side present at 16-32px, where the
-            # whole mark averages down to a smudge; the gain is still kept
-            # below saturation, because letting the lit wall reach the top of
-            # the ramp turns it into a solid white slab and loses the texture
-            # exactly where the cup is biggest.
-            return 0.22 + 0.64 * lambert
+            # A low floor and a gain that reaches the top of the ramp. An
+            # earlier pass compressed the ceramic into a narrow mid band to
+            # avoid a blown-out wall; the wall stayed readable at 136px and the
+            # whole mark collapsed to flat grey at 16px. Spending the full ramp
+            # is what buys the small sizes, and the rim term above is what
+            # keeps the bright side from reading as a featureless slab.
+            return 0.10 + 0.90 * lambert
         if t > 6.0:
             break
         t += max(d * 0.85, 0.004)
@@ -190,7 +211,9 @@ def main():
             buckets.setdefault(level, []).extend(glyph(level, cx, cy))
 
     for level in sorted(buckets):
-        opacity = 0.34 + 0.66 * (level / LEVELS)
+        # The floor is low on purpose: the faintest glyphs have to actually
+        # recede, or every cell contributes ink and the disc fills in.
+        opacity = 0.13 + 0.87 * (level / LEVELS)
         out.append(
             f'<path fill="#ffffff" fill-opacity="{opacity:.2f}"'
             f' d="{"".join(buckets[level])}"/>'
