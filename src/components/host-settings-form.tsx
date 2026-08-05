@@ -71,9 +71,16 @@ export function HostSettingsForm({ settings }: { settings: Settings }) {
           label="bookings open"
           description="off hides every picker without touching your hours or history."
         />
-        {/* A React-controlled Switch isn't a form control, so the checkbox
-            below is what actually reaches the action. */}
-        <input type="checkbox" name="bookingsOpen" checked={open} readOnly hidden />
+        {/* A React-controlled Switch isn't a form control, so the input below
+            is what actually reaches the action. It carries the flag as a value
+            rather than as a hidden checkbox: React resets any form with a
+            function action after every submit, and a checkbox's defaultChecked
+            is captured once at mount and never re-synced, so the reset would
+            snap the DOM back to the value the page loaded with while the Switch
+            still showed the new one — and the next save would silently reopen
+            bookings the host had just closed. A hidden input's default is
+            re-synced on every render, so it survives the reset. */}
+        <input type="hidden" name="bookingsOpen" value={open ? "1" : "0"} />
 
         {!open ? (
           <Field label="closed message" hint="shown in place of the picker.">
