@@ -37,6 +37,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# …except the template. It holds names only, never values — see the comment at
+# the top of the file. Without this negation `.env*` swallows it and the
+# variables in the README have nothing to be copied from.
+!.env.example
 
 # vercel
 .vercel
