@@ -29,10 +29,14 @@ VIEW = 136.0            # viewBox units
 CELL = VIEW / N
 DISC = 0.97             # black disc radius, normalised
 LEVELS = 11             # 1..11; 0 is empty, mirroring the ramp's leading space
-SCALE = 1.14            # world units across the disc radius; lower zooms in
+# World units across the disc radius; lower zooms in. Tuned so the cup keeps a
+# ring of empty disc around it — the mark was previously sized to the artboard
+# and ran right up to the edge, which reads as cramped at every size.
+SCALE = 1.30
 # The handle only sticks out on one side, so the silhouette has to be
-# re-centred or the cup sits visibly left of the disc's middle.
-U_OFFSET = 0.36
+# re-centred or the cup sits visibly left of the disc's middle. Scales with
+# SCALE, since it is applied in the same units.
+U_OFFSET = 0.41
 
 CUP_R = 0.72            # cup radius in world units
 CUP_H = 0.54            # half-height
@@ -192,7 +196,11 @@ def main():
         f' width="{VIEW:.0f}" height="{VIEW:.0f}">',
         "<title>coffee</title>",
         # The disc is the whole background; outside it stays transparent, the
-        # way the donut icons on the other sites do it.
+        # way the donut icons on the other sites do it. It is load-bearing, not
+        # decoration: the cup is drawn in white ink only, so dropping the disc
+        # makes the icon invisible against a light tab bar. Anything that wants
+        # a transparent background has to invert the ramp under
+        # prefers-color-scheme first, not just delete the circle.
         f'<circle cx="{VIEW / 2:.0f}" cy="{VIEW / 2:.0f}"'
         f' r="{DISC * VIEW / 2:.2f}" fill="#000000"/>',
     ]
