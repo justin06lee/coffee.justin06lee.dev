@@ -167,17 +167,6 @@ export async function deleteEventType(
   return { ok: true };
 }
 
-export async function reorderEventTypes(idsInOrder: string[]): Promise<void> {
-  await initDb();
-  const now = Date.now();
-  await db.batch(
-    idsInOrder.map((id, index) => ({
-      sql: "UPDATE coffee_event_types SET position = ?, updated_at = ? WHERE id = ?",
-      args: [index, now, id],
-    })),
-  );
-}
-
 /** URL-safe, lowercase, collapsed — the shape the booking route expects. */
 export function slugify(value: string): string {
   return value
