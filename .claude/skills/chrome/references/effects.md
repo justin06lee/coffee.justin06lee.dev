@@ -253,7 +253,7 @@ it animates on mount only — there is no in-view trigger and no exit animation.
 - `delay: number = 0 — delay before the animation starts, in seconds.`
 - `y: number = -10 — starting vertical offset in px (animates to 0).`
 - `x: number = 0 — starting horizontal offset in px (animates to 0).`
-- `duration: number = 0.4 — animation duration in seconds.`
+- `duration: number = 0.8 — animation duration in seconds.`
 - `className: string`
 - `children: ReactNode`
 

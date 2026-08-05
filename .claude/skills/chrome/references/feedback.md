@@ -113,6 +113,41 @@ quieter escape hatch beside it. `size` scales the padding and type.
 )}
 ```
 
+## live-badge
+
+**Role:** "happening right now" — a pulsing dot, a word, and an optional detail.
+**Install:** `bunx @justin06lee/chrome@latest add live-badge`
+**Composes:** nothing beyond utils
+
+four fixed states — `live`, `connecting`, `idle`, `offline` — each with its own
+dot treatment and default word, plus an optional `detail` appended after a
+middot (a listener count, a bitrate, a room name).
+
+`badge` is a chip in a row of metadata: it says what a thing **is**. this says
+what a thing is **doing at this second**, which is what earns it a separate
+component — the states are fixed rather than free-form variants, the dot
+animates, and the whole thing carries `role="status"` so a change from offline
+to live is *announced* rather than silently redrawn.
+
+the pulse is **a ring expanding out of the dot, not the dot itself blinking** —
+a blinking element in the corner of the eye is genuinely unpleasant to sit
+beside for an hour. under reduced motion the ring is dropped and the dot stays
+lit: "live" is information, and it survives without the animation. keep both
+behaviours if you restyle it.
+
+**Key props:**
+- `status: 'live' | 'connecting' | 'idle' | 'offline' = 'live'`
+- `label: ReactNode` — overrides the default word for the status.
+- `detail: ReactNode` — appended after a middot — a listener count, a bitrate, a room name.
+- `size: 'sm' | 'md' = 'md'`
+- `accent: string = '#fff'` — css color of the dot when live.
+- `className: string`
+
+**Example:**
+```tsx
+<LiveBadge status={connected ? "live" : "connecting"} detail={`${listeners} listening`} />
+```
+
 ## progress
 
 **Role:** linear progress bar — determinate from a value, or an indeterminate sweep.

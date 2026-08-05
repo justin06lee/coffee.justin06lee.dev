@@ -157,7 +157,8 @@ function loadRegistry(dir) {
 
 function loadDocs() {
   const out = new Map();
-  if (!existsSync(REFS)) return out;
+  const dupes = [];
+  if (!existsSync(REFS)) return { docs: out, dupes };
   for (const file of readdirSync(REFS).filter((f) => f.endsWith(".md")).sort()) {
     const text = readFileSync(join(REFS, file), "utf8");
     const lines = text.split("\n");
@@ -165,6 +166,9 @@ function loadDocs() {
     for (const line of lines) {
       const h = /^##\s+(\S+)\s*$/.exec(line);
       if (h) {
+        // A component documented twice is worse than one documented never:
+        // the two copies drift apart and an agent reads whichever it hits first.
+        if (out.has(h[1])) dupes.push(`${h[1]}: ${out.get(h[1]).file} and ${file}`);
         cur = { name: h[1], file, props: new Map(), install: null, composes: null };
         out.set(h[1], cur);
         continue;
@@ -173,17 +177,19 @@ function loadDocs() {
       if (line.startsWith("**Install:**")) cur.install = line.slice(12).trim();
       if (line.startsWith("**Composes:**")) cur.composes = line.slice(13).trim();
       // - `name: type = default — note.`   /   - `name` — required — note
-      const b = /^-\s+`([^`:]+?)(?::|`)/.exec(line);
+      const b = /^-\s+`([^`]+)`/.exec(line);
       if (b) {
-        const raw = b[1].trim();
+        const inner = b[1];
+        const raw = inner.split(":")[0].trim();
         const key = raw.includes("(") ? raw : raw.split(".").pop();
-        // Pull a default out of the bullet if one is stated.
-        const d = /=\s*([^`—]+?)\s*(?:—|`)/.exec(line);
+        // Pull a default out of the backticked part only, and skip the `=` of a
+        // `=>` arrow so a callback type isn't read as a default value.
+        const d = /\s=\s*(?!>)([^—]+)/.exec(inner);
         cur.props.set(key, d ? d[1].trim() : null);
       }
     }
   }
-  return out;
+  return { docs: out, dupes };
 }
 
 const normDefault = (v) => (v == null ? null : String(v).trim().replace(/^['"]|['"]$/g, "").replace(/\s+/g, ""));
@@ -191,8 +197,8 @@ const normDefault = (v) => (v == null ? null : String(v).trim().replace(/^['"]|[
 /* ------------------------------------------------------------------ check */
 
 function check(registry, registryDir, quiet) {
-  const docs = loadDocs();
-  const problems = { undocumented: [], stale: [], props: [], defaults: [] };
+  const { docs, dupes } = loadDocs();
+  const problems = { undocumented: [], stale: [], duplicated: dupes, props: [], defaults: [] };
 
   for (const [name, meta] of [...registry].sort()) {
     const doc = docs.get(name);
@@ -224,6 +230,7 @@ function check(registry, registryDir, quiet) {
   };
   section("UNDOCUMENTED components", problems.undocumented);
   section("STALE doc sections (not in registry)", problems.stale);
+  section("DUPLICATED sections (same component in two files)", problems.duplicated);
   section("UNDOCUMENTED props", problems.props);
   section("DEFAULT mismatches", problems.defaults);
 
@@ -296,7 +303,7 @@ if (cmd === "check") {
   }
   console.log(scaffold(meta));
 } else if (cmd === "list") {
-  const docs = loadDocs();
+  const { docs } = loadDocs();
   for (const name of [...registry.keys()].sort()) {
     const d = docs.get(name);
     console.log(`${name.padEnd(20)} ${d ? d.file : "— UNDOCUMENTED"}`);

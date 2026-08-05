@@ -2,6 +2,8 @@
 
 small building-block controls: chips, buttons, form inputs, keycaps, and pickers. these are the atoms of the chrome registry — thin translucent borders, square corners, dark-only styling on a transparent background. every component installs its own transitive dependencies when added via the cli, so `add tag-input` pulls in `badge` and `utils` automatically.
 
+three of these draw a distinction that is easy to get wrong. `checkbox` states an intent that a later submit commits; `switch` takes effect the moment it moves (hence `role="switch"`). `radio-group` is "exactly one of these" with the arrow-key contract screen readers expect; `segmented` is the same choice styled as a view toggle. and `field` is the wrapper that wires any of them to their own label, hint and error — reach for it rather than hand-matching `aria-describedby` at the call site.
+
 ## badge
 
 **Role:** small chip for labels, tech tags, and toggleable filter chips.
@@ -34,7 +36,9 @@ classes merge via `cn` (clsx + tailwind-merge), so `className` overrides win ove
 **Install:** `bunx @justin06lee/chrome@latest add button`
 **Composes:** lucide-react (npm)
 
-renders a `<button>` by default, or a plain `<a>` when given `href` — no framework router involved, so it works anywhere; external urls (matching `http(s)://`) get `target="_blank"` and `rel="noopener noreferrer"` automatically. five variants: `solid`, `outline` (the default), `dashed`, `ghost`, and `link`. the `link` variant drops padding/size classes entirely and behaves like inline text with an underline on hover.
+renders a `<button>` by default, or an `<a>` when given `href`; external urls (matching `http(s)://`) get `target="_blank"` and `rel="noopener noreferrer"` automatically. five variants: `solid`, `outline` (the default), `dashed`, `ghost`, and `link`. the `link` variant drops padding/size classes entirely and behaves like inline text with an underline on hover.
+
+by default the anchor is a plain `<a>`, so the component stays framework-agnostic. pass `linkComponent` (your router's Link) to get client-side navigation for **internal** hrefs — external `http(s)` hrefs always fall back to a plain `<a>` regardless, since a router can't handle them. `prefetch` is forwarded to `linkComponent` when set.
 
 icons are lucide components passed as `icon` / `iconRight`. omitting `children` makes it an icon-only square button — those need an accessible name, resolved as `label` first, then `tooltip`. the `tooltip` prop renders a white slide-up pill above the button on hover (pure css transition, `aria-hidden`, positioned off the `group` class).
 
@@ -48,6 +52,8 @@ icons are lucide components passed as `icon` / `iconRight`. omitting `children` 
 - `tooltip: string — white slide-up pill shown on hover.`
 - `label: string — aria-label override; required for icon-only buttons.`
 - `href: string — renders as <a>. external URLs (http(s)://) get target="_blank" auto-applied.`
+- `linkComponent: React.ElementType — anchor component for internal hrefs — pass your router's Link (e.g. next/link) for client-side navigation + prefetch. external http(s) hrefs always use a plain <a>.`
+- `prefetch: boolean — forwarded to linkComponent (e.g. next/link's prefetch) when set.`
 - `onClick: () => void`
 - `fullWidth: boolean = false`
 - `disabled: boolean = false`
@@ -212,6 +218,54 @@ pass `files` to render rows under the zone: each shows the name plus a `progress
 />
 ```
 
+## field
+
+**Role:** label, control, hint and error as one accessible unit.
+**Install:** `bunx @justin06lee/chrome@latest add field`
+**Composes:** nothing beyond utils
+
+wraps any control in a label row (with optional `required` marker, `optional`
+tag, and a trailing `action` slot for a counter or a "forgot?" link), the
+control itself, and a hint-or-error line beneath.
+
+**the render-prop form is the reason to use it.** pass `children` as a function
+and it receives `{ id, "aria-describedby", "aria-invalid", required }` already
+computed — spread that onto your input and the label, hint and error are
+announced correctly without matching ids by hand. the registry had inputs but
+nothing to wire them to their own description, and call sites were rebuilding
+`aria-describedby` manually and mostly getting it wrong. passing children as a
+plain node still works (the label's `htmlFor` is wired), you just don't get the
+aria plumbing.
+
+**hint and error never show together** — an error *replaces* the hint rather
+than stacking under it, so the message that needs acting on is the only thing in
+the slot. the presence of `error` is what marks the field invalid; there is no
+separate `invalid` prop. errors carry a live region (they arrive after a submit
+the user is watching, so they announce themselves) while hints are static and
+deliberately silent.
+
+`labelHidden` keeps the label for screen readers only — use it rather than
+dropping the label when a column header already names the field.
+
+**Key props:**
+- `label: ReactNode` — required — label text.
+- `children: ReactNode | ((props: FieldControlProps) => ReactNode)` — required — the control. pass a function to receive { id, aria-describedby, aria-invalid, required } and spread it onto the input.
+- `htmlFor: string` — explicit control id; one is generated when omitted.
+- `hint: ReactNode` — muted line under the control. hidden while an error is showing.
+- `error: ReactNode` — error text. its presence is what marks the field invalid.
+- `required: boolean = false` — adds a marker to the label and sets required on the control.
+- `optional: boolean = false` — renders a muted "optional" tag instead. ignored when required.
+- `labelHidden: boolean = false` — keeps the label for screen readers only.
+- `action: ReactNode` — trailing slot on the label row — a counter, a "forgot?" link.
+- `className: string`
+
+**Example:**
+```tsx
+<Field label="email" required hint="we only use this for the receipt." error={errors.email}>
+  {(props) => <Input {...props} type="email" value={email} onChange={(e) => setEmail(e.target.value)} />}
+</Field>
+```
+
 ## input
 
 **Role:** minimal single-line text input.
@@ -257,33 +311,58 @@ purely presentational and server-safe. compose combos by placing several side by
 </div>
 ```
 
-## pagination
+## radio-group
 
-**Role:** page navigation with boundary pages, a sibling window and ellipsis gaps.
-**Install:** `bunx @justin06lee/chrome@latest add pagination`
-**Composes:** lucide-react (npm)
+**Role:** single-choice group with a proper roving tabindex.
+**Install:** `bunx @justin06lee/chrome@latest add radio-group`
+**Composes:** nothing beyond utils
 
-renders as a `<nav>` wrapping a list, with the current page carrying `aria-current="page"` — a screen reader announces position instead of having to infer it from styling, which is the whole difference between this and a row of styled buttons. returns `null` at one page or fewer, so you can render it unconditionally under a list.
+a controlled, generically-typed group: `value: T | null`, `onChange(value: T)`,
+and `options: { value, label, description?, meta?, disabled? }[]`. two variants —
+`list` (compact rows) and `cards` (padded rows that surface `description` and the
+trailing `meta` slot, for choosing between *things* rather than values, like
+pricing tiers).
 
-the sibling window **shifts** at the ends rather than shrinking: clamping without shifting renders `1 2 … 20` on page 1 and `1 … 18 19 20` on page 20, so the control would change width as you page through it. and a gap that would elide exactly one page renders that page instead — `1 … 3` costs the same width as `1 2 3` and tells the reader less.
+the keyboard contract is the point of using it over hand-rolled buttons.
+**arrows move focus *and* selection**, wrapping at the ends and skipping disabled
+options, which is the ARIA-recommended behavior for a radiogroup; only the
+selected option is tabbable, so the whole group is one tab stop. with nothing
+selected, the first enabled option holds the tab stop, so the group is never
+keyboard-unreachable.
 
-`compact` drops the numbers for prev / next plus a `3 / 12` readout, which is the right form in a sidebar or on mobile.
+it exists because call sites were either faking single-choice with buttons —
+losing exactly that arrow-key contract screen-reader users expect — or reaching
+for a `select` on a three-option choice.
 
-the range logic ships as its own module (`pagination-range.ts`) and is exported as `paginationRange(page, pageCount, siblings, boundaries)` returning `(number | GAP)[]` — use it directly if you need the same elision in a different shell.
+vs siblings: `radio-group` is a form value with visible options and
+descriptions; `segmented` is the same exclusivity styled as a compact view
+toggle; `select`/`combobox` when the list is long enough to need collapsing or
+filtering; `checkbox` when the choices aren't mutually exclusive.
 
 **Key props:**
-- `page: number (required) — 1-based.`
-- `pageCount: number (required) — 1 or fewer renders nothing.`
-- `onChange: (page: number) => void (required)`
-- `siblings: number = 1 — pages either side of the current one.`
-- `boundaries: number = 1 — pages pinned at each end.`
-- `compact: boolean = false`
-- `ariaLabel: string = 'pagination'`
+- `value: T | null` — required — selected value; null for nothing chosen.
+- `onChange: (value: T) => void` — required
+- `options: RadioOption<T>[]` — required — { value, label, description?, meta?, disabled? }. description and meta render in the "cards" variant only.
+- `label: ReactNode` — mono uppercase caption above the group.
+- `variant: 'list' | 'cards' = 'list'` — 'cards' pads the rows out and shows description/meta.
+- `orientation: 'vertical' | 'horizontal' = 'vertical'`
+- `ariaLabel: string` — accessible name when there is no visible label.
+- `disabled: boolean = false` — disables every option.
 - `className: string`
 
 **Example:**
 ```tsx
-<Pagination page={page} pageCount={Math.ceil(total / perPage)} onChange={setPage} />
+const [plan, setPlan] = useState<"free" | "pro">("free");
+<RadioGroup
+  label="plan"
+  variant="cards"
+  value={plan}
+  onChange={setPlan}
+  options={[
+    { value: "free", label: "free", description: "one project.", meta: "$0" },
+    { value: "pro", label: "pro", description: "unlimited projects.", meta: "$12/mo" },
+  ]}
+/>
 ```
 
 ## range
@@ -341,6 +420,48 @@ const [view, setView] = useState<"day" | "month" | "year">("day");
     { value: "month", label: "month" },
     { value: "year", label: "year" },
   ]}
+/>
+```
+
+## switch
+
+**Role:** instant on/off toggle with role="switch".
+**Install:** `bunx @justin06lee/chrome@latest add switch`
+**Composes:** nothing beyond utils
+
+a controlled square track with a square knob, an optional `label` (clicking it
+toggles) and a `description` second line. `labelPosition="start"` puts the label
+first and pushes the track to the far edge — the settings-row layout.
+
+**the distinction from `checkbox` is semantic, not cosmetic, and the library
+takes it seriously.** a checkbox states an intent that a later submit commits; a
+switch takes effect the moment it moves. that is why this carries
+`role="switch"` and reads as "on"/"off" rather than "checked". if the change
+needs a save button, you want `checkbox`.
+
+the shape is a deliberate design-language choice worth preserving in your
+installed copy: square track, square knob. the pill shape every other library
+uses is the single detail that would make it look imported from somewhere else.
+
+**Key props:**
+- `checked: boolean` — required
+- `onChange: (checked: boolean) => void` — required
+- `label: ReactNode` — text beside the track; clicking it toggles.
+- `description: ReactNode` — second line under the label.
+- `labelPosition: 'start' | 'end' = 'end'` — 'start' puts the label first and pushes the track to the far edge.
+- `size: 'sm' | 'md' = 'md'`
+- `disabled: boolean = false`
+- `ariaLabel: string` — accessible name when there is no visible label.
+- `className: string`
+
+**Example:**
+```tsx
+<Switch
+  checked={notify}
+  onChange={setNotify}
+  labelPosition="start"
+  label="email notifications"
+  description="sent when a booking is confirmed."
 />
 ```
 
