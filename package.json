@@ -1,6 +1,6 @@
 {
   "name": "coffee.justin06lee.dev",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "scripts": {
     "dev": "npm run icons && next dev",
