@@ -3,10 +3,8 @@
 import { redirect } from "next/navigation";
 import { checkBookingRate } from "@/lib/auth";
 import { currentClientIp } from "@/lib/auth-server";
-import { availabilityFor, createBooking, getBookingByCancelToken, cancelBooking } from "@/lib/bookings";
-import { getEventType } from "@/lib/event-types";
-import { addDaysToDateKey, dateKeyInTimeZone, isValidTimeZone } from "@/lib/time";
-import { getSettings } from "@/lib/settings";
+import { cancelBooking, createBooking, getBookingByCancelToken } from "@/lib/bookings";
+import { isValidTimeZone } from "@/lib/time";
 
 /** Guest-supplied strings are bounded here, before anything reaches the database. */
 const LIMITS = {
@@ -18,6 +16,12 @@ const LIMITS = {
 // Deliberately loose. Anything stricter rejects addresses that are perfectly
 // valid — the real check is whether the invite arrives, which no regex knows.
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+// The ECMAScript time-value range. `Number.isFinite` alone lets 1e20 through,
+// and the first thing the booking path does with a start is read its host-zone
+// date key — `Intl` throws `RangeError: Invalid time value` on anything outside
+// this, which surfaces as a 500 rather than a form error.
+const MAX_TIME_VALUE = 8.64e15;
 
 export type BookFormState = {
   error: string | null;
@@ -47,7 +51,11 @@ export async function bookSlot(
   const notes = String(formData.get("notes") ?? "").trim();
   const timeZone = String(formData.get("timeZone") ?? "");
 
-  if (!eventTypeId || !Number.isFinite(startAt)) {
+  if (
+    !eventTypeId ||
+    !Number.isInteger(startAt) ||
+    Math.abs(startAt) > MAX_TIME_VALUE
+  ) {
     return { error: "something went wrong with that slot. reload and try again." };
   }
   if (name.length === 0) return { error: "your name, please." };
@@ -71,30 +79,15 @@ export async function bookSlot(
   redirect(`/booked/${result.booking.cancelToken}`);
 }
 
-/** Slots for a window, as absolute instants. The client groups them by the zone it's showing. */
-export async function fetchSlots(
-  eventTypeId: string,
-  fromDateKey: string,
-  toDateKey: string,
-): Promise<number[]> {
-  const eventType = await getEventType(eventTypeId);
-  if (!eventType || !eventType.active) return [];
-  const { days } = await availabilityFor(eventType, fromDateKey, toDateKey);
-  return days.flatMap((d) => d.slots);
-}
-
-/** The full bookable horizon for an event type, from today in the host's zone. */
-export async function fetchHorizon(eventTypeId: string): Promise<number[]> {
-  const eventType = await getEventType(eventTypeId);
-  if (!eventType || !eventType.active) return [];
-  const settings = await getSettings();
-  const today = dateKeyInTimeZone(Date.now(), settings.timeZone);
-  return fetchSlots(
-    eventTypeId,
-    today,
-    addDaysToDateKey(today, eventType.maxDaysAhead),
-  );
-}
+// `fetchSlots`/`fetchHorizon` used to live here. They had no callers — the
+// booking page computes the whole horizon server-side and hands it to
+// <BookingFlow> as a prop — but a "use server" export is not dead code: Next
+// compiles every one into a POST endpoint with a stable action id that anyone
+// can call. Their date keys went unvalidated into `slotsForRange`, so
+// `fetchSlots(id, "0001-01-01", "9999-12-31")` walked ~2.96M days of Intl
+// formatting on one request, and a malformed key threw out of `parseDateKey`
+// as a 500. Deleting them removes the endpoint rather than validating an
+// entry point nothing uses.
 
 export type CancelState = { error: string | null; done: boolean };
 
@@ -104,6 +97,16 @@ export async function cancelByToken(
 ): Promise<CancelState> {
   const token = String(formData.get("token") ?? "");
   const reason = String(formData.get("reason") ?? "").trim();
+
+  // Cancel tokens are UUIDs, so guessing one is not the worry — an unmetered
+  // lookup endpoint is. Without this, the action is a free, unauthenticated
+  // database query per request. Reuses the booking bucket rather than adding a
+  // table: both are "a stranger touching the calendar".
+  const ip = await currentClientIp();
+  if (!(await checkBookingRate(ip))) {
+    return { error: "too many attempts. try again in a bit.", done: false };
+  }
+  if (!token) return { error: "we couldn't find that booking.", done: false };
 
   const booking = await getBookingByCancelToken(token);
   if (!booking) return { error: "we couldn't find that booking.", done: false };
