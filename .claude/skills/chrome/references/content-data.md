@@ -1,6 +1,6 @@
 # content & data display
 
-components for rendering content and data: markdown pipelines (prose, collapsible-prose, article, code-block), browsable collections (gallery, article-list, file-card), date and activity views (calendar, calendar-nav, heatmap, timeline), plus an image cropper, a credential form, and a demo frame (showcase). all are dark-only client components that install at your configured components alias and share the registry's brutalist conventions: square corners, thin `white/10`–`white/20` borders, mono accents, lowercase copy. every component takes `className` on its root even where meta.ts omits it.
+components for rendering content and data: markdown pipelines (prose, collapsible-prose, article, code-block), browsable collections (gallery, article-list, file-card), documents (docket), date and activity views (calendar, calendar-nav, heatmap, timeline), plus an image cropper, a credential form, and a demo frame (showcase). all are dark-only client components that install at your configured components alias and share the registry's brutalist conventions: square corners, thin `white/10`–`white/20` borders, mono accents, lowercase copy. every component takes `className` on its root even where meta.ts omits it.
 
 ## article
 
@@ -166,6 +166,44 @@ vs `prose`: use collapsible-prose for long-form documents where sections should 
 <CollapsibleProse renderMarkdown={(md) => <Prose>{md}</Prose>}>
   {markdown}
 </CollapsibleProse>
+```
+
+## docket
+
+**Role:** work order / docket — a numbered document with label-value rows and an optional tear-off stub.
+**Install:** `bunx @justin06lee/chrome@latest add docket`
+**Composes:** nothing beyond utils
+
+`detail-list` renders the same label-value pairs, and docket uses that shape for its `rows` — but a docket is the *document* around them: it carries a reference in a mono header, it has a slot for a mark, and it tears. reach for detail-list when you want metadata inside something else, and for a docket when the thing itself is the record. rows render as a real `<dl>`.
+
+the `mark` slot sits at the top right of the body and is designed for a `stamp` — `received`, `filed`, `void`. the title gets right padding automatically when a mark is present so the two never collide.
+
+`stub` adds a perforated tear line and a section below it; omit it and no tear edge is drawn. the perforation is a hard-stop repeating gradient rather than a dashed border, so the dash length is explicit and reads the same at any width. the notches at each end are **opaque circles in the page colour**, not a mask: masking the card to cut real holes also masks the border, and a docket without its outline stops reading as a document. that means `notchColor` has to match whatever the docket sits on — it defaults to `#000`, which is right on the standard black background and wrong on a raised surface.
+
+**Key props:**
+- `reference: ReactNode — printed in the header, e.g. 'OJ-0042'. set in mono.`
+- `kind: ReactNode — small caps line opposite the reference.`
+- `mark: ReactNode — top-right slot in the body; a Stamp is the intended occupant.`
+- `title: ReactNode`
+- `rows: DocketRow[] — { label, value }[] rendered as a <dl>.`
+- `children: ReactNode — body content under the rows.`
+- `stub: ReactNode — content below the perforation.`
+- `notchColor: string = '#000000' — must match the surface behind the docket.`
+- `className: string`
+
+**Example:**
+```tsx
+<Docket
+  kind="work order"
+  reference="OJ-0042"
+  title="rebuild the intake form"
+  mark={<Stamp size="sm">received</Stamp>}
+  rows={[
+    { label: "job type", value: "build" },
+    { label: "budget", value: "1k – 5k" },
+  ]}
+  stub={<CopyButton text="OJ-0042" />}
+/>
 ```
 
 ## file-card

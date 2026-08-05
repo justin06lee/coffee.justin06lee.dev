@@ -12,23 +12,33 @@ the project owns and edits that code. the canonical docs live at
 https://chrome.justin06lee.dev and every component page there has live
 demos, copyable usage examples, and a props table.
 
-there are ~61 components, from primitives (button, input, kbd) through
-overlays (dialog, command-palette, sheet) and effects (donut, chrome foil,
-scramble) up to a full markdown editor suite (desk). per-component
-reference — role, internals, every prop, gotchas, canonical example — is
-split across the files in `references/`:
+the registry currently holds ~95 components, from primitives (button,
+input, kbd) through overlays (dialog, command-palette, sheet) and effects
+(donut, chrome foil, scramble) up to a full markdown editor suite (desk).
+per-component reference — role, internals, every prop, gotchas, canonical
+example — is split across the files in `references/`:
 
 | file | covers |
 |------|--------|
-| `references/primitives.md` | badge, button, card, checkbox, color-swatch, copy-button, input, kbd, range, segmented, tag-input, textarea |
+| `references/primitives.md` | badge, button, card, checkbox, color-swatch, copy-button, dropzone, input, kbd, pagination, range, segmented, tag-input, textarea |
 | `references/overlays-nav.md` | accordion, breadcrumb, combobox, command-palette, dialog, menu, navbar, select, sheet, sidebar, tabs, toc, tooltip |
-| `references/effects.md` | ascii, chrome, count-up, donut, fade-in, intro, not-found, pfp, rainbow, scramble, sprite-scrubber, stack |
-| `references/content-data.md` | article, article-list, calendar, calendar-nav, code-block, collapsible-prose, file-card, gallery, heatmap, image-cropper, login-form, prose, showcase, timeline |
+| `references/effects.md` | ascii, ascii-shader, blueprint, chrome, count-up, dimension, donut, fade-in, grain, hazard, intro, marquee, not-found, pencil-rule, pfp, rainbow, scramble, sprite-scrubber, stack, stamp |
+| `references/content-data.md` | article, article-list, calendar, calendar-nav, code-block, collapsible-prose, docket, file-card, gallery, heatmap, image-cropper, login-form, prose, showcase, timeline |
 | `references/editor.md` | asset-sidebar, desk, drawing-window, editor, editor-toolbar, file-grid, inline-edit, manager-table, now-playing-bar, socials |
 
 read the relevant reference file before using a component from that group.
 do not guess props — the reference lists every prop with its type and
 default, taken from the source.
+
+**coverage gap.** the references currently document 77 of the ~95
+components. these nineteen exist in the registry and on the docs site but
+have no reference entry yet: `add-to-calendar`, `availability-grid`,
+`bar-list`, `break-overlay`, `clock`, `date-strip`, `detail-list`, `field`,
+`interval-picker`, `lane-bar`, `radio-group`, `slot-picker`, `sparkline`,
+`stat-tile`, `stepper`, `streak`, `switch`, `timer-ring`,
+`timezone-select`. they install exactly like everything else — for their
+props, read `https://chrome.justin06lee.dev/components/<name>` or the
+installed source, and do not guess.
 
 ## installing components into a project
 
@@ -145,10 +155,21 @@ too, or the seams show:
   blocks via `onEventClick`, multi-track via `tracks`, drag-to-edit via
   `onEventChange`), `calendar-nav` (the header controls above any of them).
 - flair: `chrome` (foil text effect — wraps anything), `donut` (spinning
-  ascii torus), `scramble` (hover text scramble), `rainbow`, `count-up`,
+  ascii torus), `ascii-shader` (any `(x, y, t) => luminance` on a char
+  grid), `scramble` (hover text scramble), `rainbow`, `count-up`,
   `fade-in`, `intro` (full-screen splash), `ascii` (exact-grid ascii art),
-  `not-found` (404 page with random ascii cats), `pfp` (3d-tilt avatar
-  with cartoon glint).
+  `marquee` (scrolling ticker band), `not-found` (404 page with random
+  ascii cats), `pfp` (3d-tilt avatar with cartoon glint).
+- drafting surfaces & marks: `blueprint` (graph-paper substrate with an
+  optional crosshair), `hazard` (caution-stripe tape and frame),
+  `dimension` (architect's measurement line), `pencil-rule` (a rule that
+  draws itself), `stamp` (rotated rubber stamp — the counterpart to
+  `badge`), `grain` (paper/film texture overlay). this group takes its
+  colour through props, so it is where a site's accent goes.
+- forms & records: `field` (label + control + error), `dropzone` (drag-drop
+  upload with validation), `textarea` with `counter` (long-form briefs),
+  `stepper` (sequenced flow), `docket` (a numbered document with rows and
+  a tear-off stub), `pagination` (page navigation for long lists).
 - editor: `desk` is the full markdown workstation (toolbar + assets +
   split panes + save); `editor`, `editor-toolbar`, `asset-sidebar` are its
   parts and compose independently; `file-grid` is the standalone asset

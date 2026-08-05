@@ -170,6 +170,48 @@ use this for the "copy a command / snippet" affordance next to code. if you want
 <CopyButton text="bunx @justin06lee/chrome@latest init" />
 ```
 
+## dropzone
+
+**Role:** standalone drag-and-drop upload zone with validation and file rows.
+**Install:** `bunx @justin06lee/chrome@latest add dropzone`
+**Composes:** progress (registry), lucide-react (npm)
+
+the registry previously had drop handling only *inside* `asset-sidebar`; this is the standalone control. it is deliberately stateless: it validates a drop against `accept` / `maxSize` / `maxFiles` and hands you `File[]`, while the rows it renders come from whatever state you keep. upload transport is none of its business.
+
+two details it gets right that a naive version doesn't. drag depth is **counted** rather than toggled: `dragleave` fires whenever the pointer crosses onto a child, so a boolean flag strobes the highlight off while you are still over the zone's own text. and the zone is a real `<button>`, so click, Enter and Space all open the picker and it lands in the tab order without any `role` or key handling. the hidden input's value is cleared after each pick so the same file can be selected twice in a row — otherwise the second `change` never fires.
+
+`accept` uses the native syntax and is enforced on drop too (drops bypass the input entirely): extensions (`.pdf`), full mime types (`application/pdf`) and wildcards (`image/*`) all match. anything rejected arrives at `onReject` tagged with the rule it broke — `'type' | 'size' | 'count'` — so you can say *why* rather than silently dropping it.
+
+pass `files` to render rows under the zone: each shows the name plus a `progress` bar, an error, or a human-readable size, in that order of precedence. `onRemove` adds a remove button per row. `accent` colours both the active border and the progress bars.
+
+**Key props:**
+- `onFiles: (files: File[]) => void (required)`
+- `onReject: (rejections: DropzoneRejection[]) => void — { file, reason: 'type' | 'size' | 'count' }[].`
+- `accept: string — native syntax, also enforced on drop.`
+- `maxSize: number — per-file limit in bytes.`
+- `maxFiles: number`
+- `multiple: boolean = true`
+- `disabled: boolean = false`
+- `label: ReactNode = 'drop files here'`
+- `hint: ReactNode — second line, usually the formats and limits.`
+- `files: DropzoneFile[] — { id, name, size?, progress?, error? }[].`
+- `onRemove: (id: string) => void`
+- `accent: string = '#ffffff'`
+- `className: string`
+
+**Example:**
+```tsx
+<Dropzone
+  accept=".pdf,.md,image/*"
+  maxSize={5 * 1024 * 1024}
+  hint="pdf, markdown or images — up to 5 mb each"
+  files={files}
+  onRemove={(id) => setFiles((f) => f.filter((x) => x.id !== id))}
+  onFiles={(dropped) => upload(dropped)}
+  onReject={(r) => toast(`${r.length} file(s) not accepted`)}
+/>
+```
+
 ## input
 
 **Role:** minimal single-line text input.
@@ -213,6 +255,35 @@ purely presentational and server-safe. compose combos by placing several side by
   <Kbd>k</Kbd>
   <span className="ml-2 text-sm text-white/50">open the palette</span>
 </div>
+```
+
+## pagination
+
+**Role:** page navigation with boundary pages, a sibling window and ellipsis gaps.
+**Install:** `bunx @justin06lee/chrome@latest add pagination`
+**Composes:** lucide-react (npm)
+
+renders as a `<nav>` wrapping a list, with the current page carrying `aria-current="page"` — a screen reader announces position instead of having to infer it from styling, which is the whole difference between this and a row of styled buttons. returns `null` at one page or fewer, so you can render it unconditionally under a list.
+
+the sibling window **shifts** at the ends rather than shrinking: clamping without shifting renders `1 2 … 20` on page 1 and `1 … 18 19 20` on page 20, so the control would change width as you page through it. and a gap that would elide exactly one page renders that page instead — `1 … 3` costs the same width as `1 2 3` and tells the reader less.
+
+`compact` drops the numbers for prev / next plus a `3 / 12` readout, which is the right form in a sidebar or on mobile.
+
+the range logic ships as its own module (`pagination-range.ts`) and is exported as `paginationRange(page, pageCount, siblings, boundaries)` returning `(number | GAP)[]` — use it directly if you need the same elision in a different shell.
+
+**Key props:**
+- `page: number (required) — 1-based.`
+- `pageCount: number (required) — 1 or fewer renders nothing.`
+- `onChange: (page: number) => void (required)`
+- `siblings: number = 1 — pages either side of the current one.`
+- `boundaries: number = 1 — pages pinned at each end.`
+- `compact: boolean = false`
+- `ariaLabel: string = 'pagination'`
+- `className: string`
+
+**Example:**
+```tsx
+<Pagination page={page} pageCount={Math.ceil(total / perPage)} onChange={setPage} />
 ```
 
 ## range
@@ -309,12 +380,16 @@ const [tags, setTags] = useState<string[]>(["react", "typescript"]);
 **Install:** `bunx @justin06lee/chrome@latest add textarea`
 **Composes:** nothing beyond utils
 
-the multiline sibling of `input`: a styled native `<textarea>` with the same thin `border-white/20`, square corners, transparent background, faint placeholder, and focus border brightening — plus `w-full` and vertical-only resize (`resize-y`). defaults to 4 rows. the props interface extends `TextareaHTMLAttributes`, so it works controlled or uncontrolled exactly like a native textarea, and it is a `forwardRef` to the element. server-safe, no client state.
+the multiline sibling of `input`: a styled native `<textarea>` with the same thin `border-white/20`, square corners, transparent background, faint placeholder, and focus border brightening — plus `w-full` and vertical-only resize (`resize-y`). defaults to 4 rows. the props interface extends `TextareaHTMLAttributes`, so it works controlled or uncontrolled exactly like a native textarea, and it is a `forwardRef` to the element.
 
 `background` sets an inline css background that wins over anything in `style`; `className` merges via `cn` so overrides land last. there is no autogrow — height is `rows` plus the user's manual resize. use `input` for single-line values.
 
+`counter` adds a live character count under the field, for long-form things like a brief or a bio. paired with `maxLength` it reads `120 / 500` and turns muted-red at 90% of the limit. it tracks only the length, never mirroring the value into state, so a controlled parent stays authoritative — and it re-reads a controlled `value` that changes without an `onChange` from the element (a reset button, a draft loaded from the server). the readout is an `aria-live="polite"` region: assertive would interrupt the user mid-keystroke. `wrapperClassName` targets the wrapper that only exists when `counter` is set. without `counter` the component renders the bare textarea and stays server-safe.
+
 **Key props:**
 - `rows: number = 4`
+- `counter: boolean = false — live character count; pairs with maxLength.`
+- `wrapperClassName: string — the wrapper that appears when counter is set.`
 - `background: string — CSS background. transparent by default.`
 - `...props: TextareaHTMLAttributes — all native textarea attributes.`
 
@@ -326,4 +401,6 @@ the multiline sibling of `input`: a styled native `<textarea>` with the same thi
   value={v}
   onChange={(e) => setV(e.target.value)}
 />
+
+<Textarea counter maxLength={2000} rows={8} placeholder="what do you want built?" />
 ```
