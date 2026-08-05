@@ -49,31 +49,40 @@ export function verifyAdminKey(password: string): boolean {
 
 export async function createSession(): Promise<string> {
   await initDb();
-  await db.execute({
-    sql: "DELETE FROM coffee_sessions WHERE created_at < ?",
-    args: [Date.now() - SESSION_TTL],
-  });
   const token = randomUUID();
-  await db.execute({
-    sql: "INSERT INTO coffee_sessions (token, created_at) VALUES (?, ?)",
-    args: [token, Date.now()],
-  });
+  // One clock reading for both statements, so the row can't be written with a
+  // created_at the sweep above it would already consider stale.
+  const now = Date.now();
+  // Batched into a single round trip: the expiry sweep and the insert are one
+  // request, not two.
+  await db.batch(
+    [
+      {
+        sql: "DELETE FROM coffee_sessions WHERE created_at < ?",
+        args: [now - SESSION_TTL],
+      },
+      {
+        sql: "INSERT INTO coffee_sessions (token, created_at) VALUES (?, ?)",
+        args: [token, now],
+      },
+    ],
+    "write",
+  );
   return token;
 }
 
 export async function validateSession(token: string): Promise<boolean> {
   await initDb();
+  // The TTL is in the WHERE clause, so an expired token simply doesn't match
+  // and this stays one round trip on every path — it runs on every admin page
+  // load and every admin server action. Expired rows are not leaked by the
+  // missing DELETE: createSession() sweeps everything older than the TTL on
+  // each login.
   const result = await db.execute({
-    sql: "SELECT created_at FROM coffee_sessions WHERE token = ?",
-    args: [token],
+    sql: "SELECT 1 FROM coffee_sessions WHERE token = ? AND created_at >= ?",
+    args: [token, Date.now() - SESSION_TTL],
   });
-  if (result.rows.length === 0) return false;
-  const createdAt = Number(result.rows[0].created_at);
-  if (Date.now() - createdAt > SESSION_TTL) {
-    await db.execute({ sql: "DELETE FROM coffee_sessions WHERE token = ?", args: [token] });
-    return false;
-  }
-  return true;
+  return result.rows.length > 0;
 }
 
 export async function destroySession(token: string): Promise<void> {
@@ -123,26 +132,34 @@ async function checkRate(
   const windowStart = now - window;
   const lockoutStart = now - lockout;
 
-  await db.execute({
-    sql: `DELETE FROM ${table} WHERE first_attempt < ?`,
-    args: [lockoutStart],
-  });
-
-  const result = await db.execute({
-    sql: `INSERT INTO ${table} (ip, count, first_attempt) VALUES (?, 1, ?)
-          ON CONFLICT(ip) DO UPDATE SET
-            count = CASE
-              WHEN ${table}.count > ? AND ${table}.first_attempt >= ? THEN ${table}.count
-              WHEN ${table}.first_attempt < ? THEN 1
-              ELSE ${table}.count + 1 END,
-            first_attempt = CASE
-              WHEN ${table}.count > ? AND ${table}.first_attempt >= ? THEN ${table}.first_attempt
-              WHEN ${table}.first_attempt < ? THEN ?
-              ELSE ${table}.first_attempt END
-          RETURNING count`,
-    args: [ip, now, max, lockoutStart, windowStart, max, lockoutStart, windowStart, now],
-  });
-  return Number((result.rows[0] as unknown as { count: number }).count) <= max;
+  // Both statements in one batch: one round trip, and "write" (BEGIN
+  // IMMEDIATE) is what actually makes the upsert's read-modify-write atomic
+  // against a concurrent request from the same IP.
+  const results = await db.batch(
+    [
+      {
+        sql: `DELETE FROM ${table} WHERE first_attempt < ?`,
+        args: [lockoutStart],
+      },
+      {
+        sql: `INSERT INTO ${table} (ip, count, first_attempt) VALUES (?, 1, ?)
+              ON CONFLICT(ip) DO UPDATE SET
+                count = CASE
+                  WHEN ${table}.count > ? AND ${table}.first_attempt >= ? THEN ${table}.count
+                  WHEN ${table}.first_attempt < ? THEN 1
+                  ELSE ${table}.count + 1 END,
+                first_attempt = CASE
+                  WHEN ${table}.count > ? AND ${table}.first_attempt >= ? THEN ${table}.first_attempt
+                  WHEN ${table}.first_attempt < ? THEN ?
+                  ELSE ${table}.first_attempt END
+              RETURNING count`,
+        args: [ip, now, max, lockoutStart, windowStart, max, lockoutStart, windowStart, now],
+      },
+    ],
+    "write",
+  );
+  // The upsert is the second statement, so its RETURNING row is results[1].
+  return Number((results[1].rows[0] as unknown as { count: number }).count) <= max;
 }
 
 /**

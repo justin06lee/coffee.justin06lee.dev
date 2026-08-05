@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { checkBookingRate } from "@/lib/auth";
 import { currentClientIp } from "@/lib/auth-server";
-import { cancelBooking, createBooking, getBookingByCancelToken } from "@/lib/bookings";
+import { cancelByCancelToken, createBooking } from "@/lib/bookings";
 import { isValidTimeZone } from "@/lib/time";
 
 /** Guest-supplied strings are bounded here, before anything reaches the database. */
@@ -100,21 +100,29 @@ export async function cancelByToken(
 
   // Cancel tokens are UUIDs, so guessing one is not the worry — an unmetered
   // lookup endpoint is. Without this, the action is a free, unauthenticated
-  // database query per request. Reuses the booking bucket rather than adding a
-  // table: both are "a stranger touching the calendar".
+  // database round trip per request. Reuses the booking bucket rather than
+  // adding a table: both are "a stranger touching the calendar".
   const ip = await currentClientIp();
   if (!(await checkBookingRate(ip))) {
     return { error: "too many attempts. try again in a bit.", done: false };
   }
   if (!token) return { error: "we couldn't find that booking.", done: false };
 
-  const booking = await getBookingByCancelToken(token);
-  if (!booking) return { error: "we couldn't find that booking.", done: false };
-  if (booking.status === "cancelled") return { error: null, done: true };
-  if (booking.startAt < Date.now()) {
+  // One round trip decides and reports: the write and the read-back ride in a
+  // single transaction, so nothing can slip between looking the booking up and
+  // cancelling it. "cancelled" covers the already-cancelled case too, which is
+  // the same reply the guest got when that was a branch of its own.
+  const outcome = await cancelByCancelToken(
+    token,
+    reason.slice(0, LIMITS.notes) || null,
+    Date.now(),
+  );
+
+  if (outcome === "not-found") {
+    return { error: "we couldn't find that booking.", done: false };
+  }
+  if (outcome === "past") {
     return { error: "that meeting has already happened.", done: false };
   }
-
-  await cancelBooking(booking.id, reason.slice(0, LIMITS.notes) || null);
   return { error: null, done: true };
 }

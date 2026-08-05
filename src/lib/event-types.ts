@@ -1,4 +1,6 @@
 import "server-only";
+import type { InStatement, Row } from "@libsql/client";
+import { cache } from "react";
 import { db, initDb, type DbEventType } from "./db";
 
 export type EventType = {
@@ -39,41 +41,80 @@ function toEventType(row: DbEventType): EventType {
   };
 }
 
-export async function listEventTypes(
+/**
+ * Reads are split into a statement builder and a mapper so a page-level loader
+ * can put them in a `db.batch` alongside its other reads — one HTTP round trip
+ * for the whole page — without copying the SQL and letting the two drift
+ * apart. The mapper stays pure: no `db`, so it works on rows from anywhere.
+ */
+export function eventTypesStatement(
   { includeInactive = false }: { includeInactive?: boolean } = {},
-): Promise<EventType[]> {
-  await initDb();
-  const result = await db.execute({
+): InStatement {
+  return {
     sql: `SELECT * FROM coffee_event_types
           ${includeInactive ? "" : "WHERE active = 1"}
           ORDER BY position ASC, created_at ASC`,
     args: [],
-  });
-  return (result.rows as unknown as DbEventType[]).map(toEventType);
+  };
 }
 
-export async function getEventTypeBySlug(slug: string): Promise<EventType | null> {
-  await initDb();
-  const result = await db.execute({
-    sql: "SELECT * FROM coffee_event_types WHERE slug = ?",
-    args: [slug],
-  });
-  const row = (result.rows as unknown as DbEventType[])[0];
-  return row ? toEventType(row) : null;
+export function eventTypeBySlugStatement(slug: string): InStatement {
+  return { sql: "SELECT * FROM coffee_event_types WHERE slug = ?", args: [slug] };
 }
 
-export async function getEventType(id: string): Promise<EventType | null> {
-  await initDb();
-  const result = await db.execute({
-    sql: "SELECT * FROM coffee_event_types WHERE id = ?",
-    args: [id],
-  });
-  const row = (result.rows as unknown as DbEventType[])[0];
-  return row ? toEventType(row) : null;
+export function eventTypeByIdStatement(id: string): InStatement {
+  return { sql: "SELECT * FROM coffee_event_types WHERE id = ?", args: [id] };
 }
+
+export function eventTypesFromRows(rows: Row[]): EventType[] {
+  return (rows as unknown as DbEventType[]).map(toEventType);
+}
+
+/**
+ * Memoized for the request: `generateMetadata` and the page body of
+ * `/[slug]` each look the type up, and a booking action looks it up again
+ * under `fetchSlots`, so the same row used to be fetched two or three times
+ * for one render.
+ *
+ * Safe only while nothing reads an event type and then writes it inside the
+ * same request — a server action and the re-render that follows it share one,
+ * so a read-then-write action would go on seeing its own stale copy. Nothing
+ * in admin/actions.ts reads before it writes (the form carries the whole
+ * record); if you add something that does, it must not read through this.
+ */
+const eventTypesQuery = cache(
+  async (includeInactive: boolean): Promise<EventType[]> => {
+    await initDb();
+    const result = await db.execute(eventTypesStatement({ includeInactive }));
+    return eventTypesFromRows(result.rows);
+  },
+);
+
+// `cache` keys on argument identity, and an `{ includeInactive: true }` literal
+// is a different object at every call site; the boolean inside it is not.
+export function listEventTypes(
+  { includeInactive = false }: { includeInactive?: boolean } = {},
+): Promise<EventType[]> {
+  return eventTypesQuery(includeInactive);
+}
+
+export const getEventTypeBySlug = cache(
+  async (slug: string): Promise<EventType | null> => {
+    await initDb();
+    const result = await db.execute(eventTypeBySlugStatement(slug));
+    return eventTypesFromRows(result.rows)[0] ?? null;
+  },
+);
+
+export const getEventType = cache(async (id: string): Promise<EventType | null> => {
+  await initDb();
+  const result = await db.execute(eventTypeByIdStatement(id));
+  return eventTypesFromRows(result.rows)[0] ?? null;
+});
 
 export type EventTypeInput = Omit<EventType, "id" | "position">;
 
+/**
 /**
  * Ceiling on either buffer, in minutes.
  *
@@ -106,21 +147,26 @@ function clampInput(input: EventTypeInput): EventTypeInput {
   };
 }
 
+/**
+ * A new type goes to the end of the list. The position is worked out by a
+ * subquery inside the insert rather than by reading the max first, so creating
+ * a type is one round trip; the subquery sees the table as it was before this
+ * row lands, which is the same value the separate SELECT used to return.
+ */
 export async function createEventType(rawInput: EventTypeInput): Promise<string> {
   const input = clampInput(rawInput);
   await initDb();
   const now = Date.now();
   const id = crypto.randomUUID();
-  const next = await db.execute(
-    "SELECT COALESCE(MAX(position), -1) + 1 AS n FROM coffee_event_types",
-  );
   await db.execute({
     sql: `INSERT INTO coffee_event_types
             (id, slug, title, blurb, duration_min, increment_min,
              buffer_before_min, buffer_after_min, min_notice_min, max_days_ahead,
              daily_limit, location, location_detail, active, position,
              created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                  (SELECT COALESCE(MAX(position), -1) + 1 FROM coffee_event_types),
+                  ?, ?)`,
     args: [
       id,
       input.slug,
@@ -136,7 +182,6 @@ export async function createEventType(rawInput: EventTypeInput): Promise<string>
       input.location,
       input.locationDetail,
       input.active ? 1 : 0,
-      Number((next.rows[0] as unknown as { n: number }).n),
       now,
       now,
     ],
@@ -182,11 +227,27 @@ export async function updateEventType(
  * enforce the declared foreign key, so this check is the constraint — without
  * it a delete would orphan bookings and the admin list would render rows whose
  * event type can't be resolved.
+ *
+ * The check rides along in the delete's WHERE clause, so the path that works
+ * is one round trip. That leaves nothing deleted meaning two different things
+ * — bookings blocked it, or the id was already gone — and the admin is shown
+ * the reason verbatim, so it's worth a second query to tell them apart. It
+ * only runs when the delete did nothing, which is the path nobody is waiting
+ * on. A missing id stays a success, as it was when the count came first:
+ * the row the admin asked to be rid of isn't there.
  */
 export async function deleteEventType(
   id: string,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
   await initDb();
+  const result = await db.execute({
+    sql: `DELETE FROM coffee_event_types
+          WHERE id = ?
+            AND NOT EXISTS (SELECT 1 FROM coffee_bookings WHERE event_type_id = ?)`,
+    args: [id, id],
+  });
+  if (result.rowsAffected > 0) return { ok: true };
+
   const used = await db.execute({
     sql: "SELECT COUNT(*) AS n FROM coffee_bookings WHERE event_type_id = ?",
     args: [id],
@@ -197,7 +258,6 @@ export async function deleteEventType(
       reason: "this type has bookings against it. archive it instead of deleting.",
     };
   }
-  await db.execute({ sql: "DELETE FROM coffee_event_types WHERE id = ?", args: [id] });
   return { ok: true };
 }
 
