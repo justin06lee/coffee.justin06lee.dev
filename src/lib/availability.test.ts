@@ -4,17 +4,26 @@ import {
   type DateOverride,
   type SlotOptions,
   type WeeklyRule,
+  MAX_RANGE_DAYS,
   isSlotBookable,
   mergeWindows,
   slotsForDate,
   slotsForRange,
   windowsForDate,
 } from "./availability";
-import { formatTimeOfDay, zonedTimeToInstant } from "./time";
+import {
+  MINUTES_PER_DAY,
+  type DateKey,
+  addDaysToDateKey,
+  dateKeyInTimeZone,
+  formatTimeOfDay,
+  zonedTimeToInstant,
+} from "./time";
 
 const LA = "America/Los_Angeles";
 
 /** 2026-08-03 is a Monday. */
+const SUNDAY = "2026-08-02";
 const MONDAY = "2026-08-03";
 const TUESDAY = "2026-08-04";
 const SATURDAY = "2026-08-08";
@@ -44,6 +53,32 @@ function options(overrides: Partial<SlotOptions> = {}): SlotOptions {
 }
 
 const labels = (slots: number[]) => slots.map((s) => formatTimeOfDay(s, LA));
+
+/**
+ * A busy interval shaped the way `busyBetween` actually produces them: `start`
+ * and `end` are the guard span, already widened by the *booked* event type's
+ * buffers, and `eventStart` is the meeting's own instant.
+ *
+ * Every fixture in this file used to be hand-written with `start` set to the
+ * unbuffered instant, which is not a value the real code can hand the slot
+ * engine. That made the buffered and unbuffered readings identical, and the
+ * daily limit counting on the wrong one went unnoticed for exactly as long.
+ */
+function booked(
+  dateKey: DateKey,
+  startMin: number,
+  durationMin: number,
+  buffers: { before?: number; after?: number } = {},
+  timeZone = LA,
+): BusyInterval {
+  const eventStart = zonedTimeToInstant(dateKey, startMin, timeZone);
+  const eventEnd = eventStart + durationMin * 60_000;
+  return {
+    start: eventStart - (buffers.before ?? 0) * 60_000,
+    end: eventEnd + (buffers.after ?? 0) * 60_000,
+    eventStart,
+  };
+}
 
 describe("mergeWindows", () => {
   it("merges overlapping and touching windows", () => {
@@ -186,12 +221,7 @@ describe("slotsForDate", () => {
   });
 
   it("removes slots that collide with a booking", () => {
-    const busy: BusyInterval[] = [
-      {
-        start: zonedTimeToInstant(MONDAY, 10 * 60, LA),
-        end: zonedTimeToInstant(MONDAY, 11 * 60, LA),
-      },
-    ];
+    const busy = [booked(MONDAY, 10 * 60, 60)];
     const slots = labels(slotsForDate(MONDAY, options(), NINE_TO_FIVE, [], busy));
     expect(slots).toContain("9:30 am");
     expect(slots).not.toContain("10:00 am");
@@ -200,12 +230,7 @@ describe("slotsForDate", () => {
   });
 
   it("keeps buffer minutes clear around a booking", () => {
-    const busy: BusyInterval[] = [
-      {
-        start: zonedTimeToInstant(MONDAY, 10 * 60, LA),
-        end: zonedTimeToInstant(MONDAY, 10 * 60 + 30, LA),
-      },
-    ];
+    const busy = [booked(MONDAY, 10 * 60, 30)];
     const slots = labels(
       slotsForDate(
         MONDAY,
@@ -224,16 +249,7 @@ describe("slotsForDate", () => {
   });
 
   it("closes the day once the daily limit is reached", () => {
-    const busy: BusyInterval[] = [
-      {
-        start: zonedTimeToInstant(MONDAY, 10 * 60, LA),
-        end: zonedTimeToInstant(MONDAY, 10 * 60 + 30, LA),
-      },
-      {
-        start: zonedTimeToInstant(MONDAY, 13 * 60, LA),
-        end: zonedTimeToInstant(MONDAY, 13 * 60 + 30, LA),
-      },
-    ];
+    const busy = [booked(MONDAY, 10 * 60, 30), booked(MONDAY, 13 * 60, 30)];
     expect(slotsForDate(MONDAY, options({ dailyLimit: 2 }), NINE_TO_FIVE, [], busy)).toEqual(
       [],
     );
@@ -245,14 +261,32 @@ describe("slotsForDate", () => {
   it("counts the daily limit per host-local day, not per UTC day", () => {
     // 5pm Monday in LA is already Tuesday in UTC; it must not count against
     // Tuesday's limit.
-    const busy: BusyInterval[] = [
-      {
-        start: zonedTimeToInstant(MONDAY, 16 * 60 + 30, LA),
-        end: zonedTimeToInstant(MONDAY, 17 * 60, LA),
-      },
-    ];
+    const busy = [booked(MONDAY, 16 * 60 + 30, 30)];
     expect(
       slotsForDate(TUESDAY, options({ dailyLimit: 1 }), NINE_TO_FIVE, [], busy).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("counts a buffered booking against the day it happens on", () => {
+    // A 30-minute lead-in on a midnight meeting reaches back into the previous
+    // day, and counting the guard span rather than the meeting put it there:
+    // the day with two bookings on it stayed wide open, and the empty day
+    // before it closed. Host open around the clock so midnight is bookable.
+    const allDay: WeeklyRule[] = [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+      weekday: weekday as WeeklyRule["weekday"],
+      startMin: 0,
+      endMin: MINUTES_PER_DAY,
+    }));
+    const busy = [
+      booked(MONDAY, 0, 30, { before: 30 }),
+      booked(MONDAY, 2 * 60, 30, { before: 30 }),
+    ];
+    const opts = options({ dailyLimit: 2, bufferBeforeMin: 30 });
+
+    expect(slotsForDate(MONDAY, opts, allDay, [], busy)).toEqual([]);
+    // …and Sunday, which has nothing on it, is not closed by the phantom.
+    expect(
+      slotsForDate(SUNDAY, opts, allDay, [], busy).length,
     ).toBeGreaterThan(0);
   });
 
@@ -327,6 +361,78 @@ describe("slotsForRange", () => {
     ]);
     expect(days.filter((d) => d.slots.length > 0)).toHaveLength(5);
   });
+
+  it("refuses a span wider than the cap instead of truncating it", () => {
+    const end = addDaysToDateKey("2026-08-03", MAX_RANGE_DAYS);
+    expect(() =>
+      slotsForRange("2026-08-03", end, options(), NINE_TO_FIVE, [], []),
+    ).toThrow(RangeError);
+    // One day narrower is the widest legitimate horizon, and still works.
+    expect(
+      slotsForRange(
+        "2026-08-03",
+        addDaysToDateKey("2026-08-03", MAX_RANGE_DAYS - 1),
+        options({ maxDaysAhead: MAX_RANGE_DAYS }),
+        NINE_TO_FIVE,
+        [],
+        [],
+      ),
+    ).toHaveLength(MAX_RANGE_DAYS);
+  });
+});
+
+/**
+ * The two halves of the same rule: `slotsForDate` decides what is offered and
+ * `isSlotBookable` decides what is accepted, and they agree only as long as an
+ * instant reads back as the day it was generated for. Stating it as a property
+ * rather than as cases is the point — the zone and date that break it are not
+ * ones anyone would think to write down. Havana and Santiago spring forward at
+ * midnight, so the wall time 00:00 simply doesn't happen there twice a decade;
+ * the other three are here to prove the check costs ordinary zones nothing.
+ */
+describe("slotsForDate / isSlotBookable agree", () => {
+  const zones = [
+    "America/Havana",
+    "America/Santiago",
+    "Europe/Berlin",
+    "Australia/Sydney",
+    "America/Los_Angeles",
+  ];
+
+  for (const timeZone of zones) {
+    it(`every slot offered in ${timeZone} is bookable`, () => {
+      // Open around the clock: a 9-5 host never meets a midnight transition.
+      const allDay: WeeklyRule[] = [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+        weekday: weekday as WeeklyRule["weekday"],
+        startMin: 0,
+        endMin: MINUTES_PER_DAY,
+      }));
+      // A coarse increment keeps a year in five zones cheap, and costs nothing
+      // here: `isSlotBookable` re-runs the whole day per slot, and the slot
+      // that breaks the invariant is always the one at 00:00, which every
+      // increment emits.
+      const opts = options({
+        timeZone,
+        incrementMin: 180,
+        maxDaysAhead: 400,
+        now: zonedTimeToInstant("2025-12-31", 0, timeZone),
+      });
+
+      let date = "2026-01-01";
+      const offenders: string[] = [];
+      for (let i = 0; i < 365; i += 1) {
+        for (const start of slotsForDate(date, opts, allDay, [], [])) {
+          if (dateKeyInTimeZone(start, timeZone) !== date) {
+            offenders.push(`${date} emitted an instant on ${dateKeyInTimeZone(start, timeZone)}`);
+          } else if (!isSlotBookable(start, opts, allDay, [], [])) {
+            offenders.push(`${date} emitted an unbookable ${start}`);
+          }
+        }
+        date = addDaysToDateKey(date, 1);
+      }
+      expect(offenders).toEqual([]);
+    });
+  }
 });
 
 describe("isSlotBookable", () => {
@@ -343,7 +449,7 @@ describe("isSlotBookable", () => {
   it("rejects a slot that has since been taken", () => {
     const slots = slotsForDate(MONDAY, options(), NINE_TO_FIVE, [], []);
     const taken: BusyInterval[] = [
-      { start: slots[0], end: slots[0] + 30 * 60_000 },
+      { start: slots[0], end: slots[0] + 30 * 60_000, eventStart: slots[0] },
     ];
     expect(isSlotBookable(slots[0], options(), NINE_TO_FIVE, [], taken)).toBe(false);
   });

@@ -3,6 +3,7 @@ import { db, initDb, type DbBooking } from "./db";
 import {
   type BusyInterval,
   type SlotOptions,
+  MAX_RANGE_DAYS,
   isSlotBookable,
   slotsForRange,
   type DayAvailability,
@@ -15,7 +16,10 @@ import {
   type DateKey,
   addDaysToDateKey,
   dateKeyInTimeZone,
+  daysBetweenDateKeys,
+  isValidDateKey,
   isValidTimeZone,
+  zonedTimeToInstant,
 } from "./time";
 
 export type Booking = {
@@ -86,6 +90,10 @@ export async function busyBetween(from: number, to: number): Promise<BusyInterva
   ).map((r) => ({
     start: r.start_at - (r.bb ?? 0) * 60_000,
     end: r.end_at + (r.ba ?? 0) * 60_000,
+    // The unpadded instant travels alongside the guard span because the daily
+    // limit counts meetings, and a meeting is where it starts — not where its
+    // lead-in buffer starts, which can be the day before.
+    eventStart: r.start_at,
   }));
 }
 
@@ -118,12 +126,33 @@ export async function availabilityFor(
   const settings = await getSettings();
   if (!settings.bookingsOpen) return { days: [], settings };
 
+  // Both keys arrive from the booking page's URL, so neither the shape nor the
+  // width of the span is trustworthy — and a well-formed key is no safer than a
+  // malformed one. `"9999-12-31"` is both problems at once: its exclusive end
+  // is `"10000-01-01"`, which is not a date key at all, and the span in front
+  // of it is millions of days. An empty calendar is the right answer to a
+  // request nobody sane made; a 500 on a public page is not.
+  if (!isValidDateKey(from) || !isValidDateKey(to)) return { days: [], settings };
+  const spanEndKey = addDaysToDateKey(to, 1);
+  if (!isValidDateKey(spanEndKey)) return { days: [], settings };
+  const span = daysBetweenDateKeys(from, to);
+  if (span < 0 || span + 1 > MAX_RANGE_DAYS) return { days: [], settings };
+
   const [rules, overrides] = await Promise.all([listRules(), listOverrides()]);
   const options = slotOptionsFor(eventType, settings, now);
 
-  // The busy window is the span itself plus the horizon needed by buffers.
-  const spanStart = new Date(`${from}T00:00:00Z`).getTime();
-  const spanEnd = new Date(`${addDaysToDateKey(to, 1)}T00:00:00Z`).getTime();
+  // The busy window is the span itself plus the horizon needed by buffers, and
+  // it is bounded by the host's midnights rather than UTC's — the days being
+  // walked are host-local days, so a UTC-midnight window is up to a day out of
+  // step with them at the edges.
+  const spanStart = zonedTimeToInstant(from, 0, settings.timeZone);
+  const spanEnd = zonedTimeToInstant(spanEndKey, 0, settings.timeZone);
+  // The guards above should make this unreachable; it stays because it is the
+  // last thing between date arithmetic and libsql's argument encoder, which
+  // answers a NaN with `RangeError: Only finite numbers can be passed`.
+  if (!Number.isFinite(spanStart) || !Number.isFinite(spanEnd)) {
+    return { days: [], settings };
+  }
   const busy = await busyBetween(spanStart, spanEnd);
 
   return {
@@ -151,10 +180,11 @@ export type BookingInput = {
  *
  * Two layers guard the same invariant. The availability re-check catches a
  * stale page — someone who loaded the picker an hour ago and submitted a slot
- * that has since been taken or blocked. The unique index on `start_at` catches
- * the narrower race where two guests pass that check concurrently and both
- * reach the insert; the loser gets the same "already taken" answer rather than
- * a 500.
+ * that has since been taken or blocked. It cannot catch two guests who pass it
+ * concurrently and both reach the insert, because by then the read it decided
+ * on is already old; the conditional insert catches that one, by asking the
+ * same question inside the write itself. The loser of either gets "already
+ * taken" rather than a 500.
  */
 export async function createBooking(
   input: BookingInput,
@@ -179,7 +209,21 @@ export async function createBooking(
   const [rules, overrides] = await Promise.all([listRules(), listOverrides()]);
   const options = slotOptionsFor(eventType, settings, now);
   const endAt = input.startAt + eventType.durationMin * 60_000;
-  const busy = await busyBetween(input.startAt, endAt);
+
+  // The re-check needs every booking on this host-local day, because the daily
+  // limit is counted over exactly that. A fixed ±24h pad around the requested
+  // slot isn't the same set: a fall-back day is 25 hours long, so a booking at
+  // one end of it falls outside a window measured from the other and the count
+  // comes up short — which is a limit bypass for anyone posting a slot
+  // directly. Bound it by the day's own midnights instead, extended to cover
+  // the slot itself in case the two ever disagree.
+  const hostDate = dateKeyInTimeZone(input.startAt, settings.timeZone);
+  const dayStart = zonedTimeToInstant(hostDate, 0, settings.timeZone);
+  const dayEnd = zonedTimeToInstant(addDaysToDateKey(hostDate, 1), 0, settings.timeZone);
+  const busy = await busyBetween(
+    Math.min(dayStart, input.startAt),
+    Math.max(dayEnd, endAt),
+  );
 
   if (!isSlotBookable(input.startAt, options, rules, overrides, busy)) {
     return { ok: false, reason: "that slot just went away. pick another one." };
@@ -190,7 +234,7 @@ export async function createBooking(
     event_type_id: eventType.id,
     start_at: input.startAt,
     end_at: endAt,
-    host_date: dateKeyInTimeZone(input.startAt, settings.timeZone),
+    host_date: hostDate,
     guest_name: input.guestName,
     guest_email: input.guestEmail,
     guest_timezone: guestTimeZone,
@@ -204,12 +248,24 @@ export async function createBooking(
   };
 
   try {
-    await db.execute({
+    // `INSERT ... SELECT ... WHERE NOT EXISTS` is one statement, so SQLite
+    // evaluates the overlap test and the write under the same lock — the read
+    // cannot go stale between them the way the availability check above can.
+    // The unique index alone was never enough: it is on `start_at`, so it only
+    // ever caught two guests picking the *identical* instant, and a 45-minute
+    // 9:00 alongside a 30-minute 9:30 sailed past it into two overlapping
+    // confirmed rows. Raw spans, not buffered ones: this is the double-booking
+    // backstop, and buffers are a scheduling preference the check above owns.
+    const result = await db.execute({
       sql: `INSERT INTO coffee_bookings
               (id, event_type_id, start_at, end_at, host_date, guest_name,
                guest_email, guest_timezone, notes, status, cancel_token,
                cancelled_at, cancel_reason, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, NULL, NULL, ?, ?)`,
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, NULL, NULL, ?, ?
+            WHERE NOT EXISTS (
+              SELECT 1 FROM coffee_bookings
+              WHERE status = 'confirmed' AND start_at < ? AND end_at > ?
+            )`,
       args: [
         booking.id,
         booking.event_type_id,
@@ -223,9 +279,17 @@ export async function createBooking(
         booking.cancel_token,
         booking.created_at,
         booking.updated_at,
+        booking.end_at,
+        booking.start_at,
       ],
     });
+    if (result.rowsAffected === 0) {
+      return { ok: false, reason: "someone just took that slot. pick another one." };
+    }
   } catch (error) {
+    // Kept as a second layer. The guard above covers overlap, but the same
+    // race can also trip `idx_coffee_bookings_slot` first, and either way the
+    // loser deserves the same answer rather than a 500.
     if (isUniqueViolation(error)) {
       return { ok: false, reason: "someone just took that slot. pick another one." };
     }
