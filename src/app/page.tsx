@@ -6,8 +6,7 @@ import { Chrome } from "@/components/chrome/chrome";
 import { EmptyState } from "@/components/chrome/empty-state";
 import { FadeIn } from "@/components/chrome/fade-in";
 import { SiteHeader } from "@/components/site-header";
-import { listEventTypes } from "@/lib/event-types";
-import { getSettings } from "@/lib/settings";
+import { landingData } from "@/lib/page-data";
 import { formatDuration } from "@/lib/time";
 
 // Availability and the event-type list are both live state; a cached landing
@@ -15,7 +14,7 @@ import { formatDuration } from "@/lib/time";
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const [settings, eventTypes] = await Promise.all([getSettings(), listEventTypes()]);
+  const { settings, eventTypes } = await landingData();
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -78,7 +77,7 @@ export default async function Home() {
                         </Badge>
                         <Badge className="gap-1">
                           <MapPin aria-hidden className="size-3" strokeWidth={1.5} />
-                          {eventType.locationDetail || eventType.location}
+                          {eventType.locationDetail || settings.defaultLocation}
                         </Badge>
                       </span>
                     </span>

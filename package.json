@@ -1,15 +1,17 @@
 {
   "name": "coffee.justin06lee.dev",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "scripts": {
-    "dev": "bun run icons && next dev",
-    "build": "bun run icons && next build",
+    "dev": "npm run icons && next dev",
+    "build": "npm run icons && next build",
     "icons": "node scripts/build-icons.mjs",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:check": "bun --conditions=react-server run scripts/db-check.ts",
+    "smoke": "bun --conditions=react-server run scripts/smoke-booking.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
@@ -25,20 +27,16 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
+    "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "vitest": "^4.1.10"
   },
-  "ignoreScripts": [
-    "sharp",
-    "unrs-resolver"
-  ],
   "trustedDependencies": [
     "sharp",
     "unrs-resolver"

@@ -5,9 +5,7 @@ import { Callout } from "@/components/chrome/callout";
 import { DetailList } from "@/components/chrome/detail-list";
 import { SiteHeader } from "@/components/site-header";
 import { BookingActions } from "@/components/booking-actions";
-import { getBookingByCancelToken } from "@/lib/bookings";
-import { getEventType } from "@/lib/event-types";
-import { getSettings } from "@/lib/settings";
+import { bookingRecord } from "@/lib/page-data";
 import { formatDuration, formatFullStamp } from "@/lib/time";
 
 export const dynamic = "force-dynamic";
@@ -23,17 +21,18 @@ type Props = { params: Promise<{ token: string }> };
 
 export default async function BookedPage({ params }: Props) {
   const { token } = await params;
-  const booking = await getBookingByCancelToken(token);
+  const { booking, eventType, settings } = await bookingRecord(token);
   if (!booking) notFound();
-
-  const [eventType, settings] = await Promise.all([
-    getEventType(booking.eventTypeId),
-    getSettings(),
-  ]);
 
   const cancelled = booking.status === "cancelled";
   const past = booking.startAt < Date.now();
-  const location = eventType?.locationDetail || eventType?.location || settings.defaultLocation;
+  // `eventType.location` is deliberately not in this chain. It is the coarse
+  // category word and always has a value ("video"), so including it made
+  // `defaultLocation` unreachable — while the event-type editor shows
+  // `defaultLocation` as the placeholder for a blank detail, promising exactly
+  // the fallback that could never fire. A guest was shown the literal string
+  // "video" instead of the host's default.
+  const location = eventType?.locationDetail || settings.defaultLocation;
   const title = eventType?.title ?? "meeting";
 
   return (

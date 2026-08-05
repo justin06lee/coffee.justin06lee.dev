@@ -8,7 +8,7 @@ import { EmptyState } from "@/components/chrome/empty-state";
 import { Field } from "@/components/chrome/field";
 import { Input } from "@/components/chrome/input";
 import { RadioGroup } from "@/components/chrome/radio-group";
-import { formatMinutes, parseDateKey } from "@/lib/time";
+import { formatMinutes, isValidDateKey, parseDateKey } from "@/lib/time";
 
 export type OverrideItem = {
   id: string;
@@ -27,21 +27,65 @@ export type DateOverridesProps = {
 
 export function DateOverrides({ overrides, today }: DateOverridesProps) {
   const [kind, setKind] = useState<"blocked" | "custom">("blocked");
+  const [date, setDate] = useState("");
+  const [note, setNote] = useState("");
   const [startTime, setStartTime] = useState("14:00");
   const [endTime, setEndTime] = useState("17:00");
+  const [dateError, setDateError] = useState<string | null>(null);
+  const [rangeError, setRangeError] = useState<string | null>(null);
+  const [added, setAdded] = useState(false);
   const [pending, startTransition] = useTransition();
+
+  /**
+   * The action returns without a word on a bad date key or an inverted window,
+   * so a 17:00–14:00 submit looked exactly like a slow render: button flickers,
+   * nothing appears. Checking the same two things here is what turns that
+   * silence into a message. The action still has the last word — this is
+   * feedback, not a security boundary.
+   */
+  function validate(): boolean {
+    const badDate = isValidDateKey(date) ? null : "pick a date.";
+    const badRange =
+      kind === "custom" && toMinutes(endTime) <= toMinutes(startTime)
+        ? "the end has to come after the start."
+        : null;
+    setDateError(badDate);
+    setRangeError(badRange);
+    return !badDate && !badRange;
+  }
 
   return (
     <div className="flex flex-col gap-6">
       <form
-        action={(formData) => startTransition(() => addDateOverride(formData))}
+        action={(formData) => {
+          if (!validate()) return;
+          startTransition(async () => {
+            await addDateOverride(formData);
+            // Everything here is controlled, so react's post-action form reset
+            // doesn't clear it — and the times are worth keeping for the next
+            // one anyway.
+            setDate("");
+            setNote("");
+            setAdded(true);
+          });
+        }}
+        onChange={() => {
+          setAdded(false);
+          setDateError(null);
+          setRangeError(null);
+        }}
         className="flex flex-col gap-4 border border-white/10 p-5"
       >
         <RadioGroup
           label="kind"
+          ariaLabel="kind of override"
           orientation="horizontal"
           value={kind}
-          onChange={(next) => setKind(next)}
+          onChange={(next) => {
+            setKind(next);
+            // A range complaint is moot once the whole day is blocked.
+            setRangeError(null);
+          }}
           options={[
             { value: "blocked" as const, label: "block the whole day" },
             { value: "custom" as const, label: "different hours" },
@@ -50,8 +94,17 @@ export function DateOverrides({ overrides, today }: DateOverridesProps) {
         <input type="hidden" name="kind" value={kind} />
 
         <div className="grid gap-4 sm:grid-cols-2">
-          <Field label="date" required>
-            {(props) => <Input {...props} name="date" type="date" min={today} />}
+          <Field label="date" required error={dateError}>
+            {(props) => (
+              <Input
+                {...props}
+                name="date"
+                type="date"
+                min={today}
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            )}
           </Field>
 
           {kind === "custom" ? (
@@ -67,7 +120,7 @@ export function DateOverrides({ overrides, today }: DateOverridesProps) {
                   />
                 )}
               </Field>
-              <Field label="to" required>
+              <Field label="to" required error={rangeError}>
                 {(props) => (
                   <Input
                     {...props}
@@ -83,7 +136,15 @@ export function DateOverrides({ overrides, today }: DateOverridesProps) {
         </div>
 
         <Field label="note" optional hint="just for you — guests never see it.">
-          {(props) => <Input {...props} name="note" placeholder="flying" />}
+          {(props) => (
+            <Input
+              {...props}
+              name="note"
+              placeholder="flying"
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          )}
         </Field>
 
         {/* The action's contract is numeric — minutes past midnight — while
@@ -92,10 +153,15 @@ export function DateOverrides({ overrides, today }: DateOverridesProps) {
         <input type="hidden" name="startMin" value={toMinutes(startTime)} />
         <input type="hidden" name="endMin" value={toMinutes(endTime)} />
 
-        <div>
+        <div className="flex items-center gap-3">
           <Button type="submit" variant="outline" disabled={pending}>
             {pending ? "adding…" : "add override"}
           </Button>
+          {/* The list below re-renders on its own, which says nothing out
+              loud. The field errors carry their own role="alert". */}
+          <span aria-live="polite" role="status" className="text-[13px] text-white/40">
+            {added ? "override added." : ""}
+          </span>
         </div>
       </form>
 

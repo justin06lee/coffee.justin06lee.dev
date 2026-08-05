@@ -17,11 +17,49 @@ bun run build
 | `src/lib/time.ts` | timezone primitives — instants, date keys, minutes past midnight |
 | `src/lib/availability.ts` | pure slot engine: rules + overrides + busy → bookable instants |
 | `src/lib/bookings.ts` | commit path, availability queries, admin stats |
+| `src/lib/page-data.ts` | one batched read per route — see below |
 | `src/lib/db.ts` | schema for the `coffee_*` tables |
 | `src/components/chrome/` | vendored chrome components — owned code, edit freely |
 | `src/app/[slug]/` | the public booking flow |
 | `src/app/admin/` | availability, meeting types, bookings |
 | `design/favicon/` | the icon generator and its SVG output |
+
+## one round trip per page
+
+Every request this app serves is bounded by round trips to Turso — there are no
+other backends — so the number of *sequential* `db.execute` hops is the latency
+budget. `db.batch` sends a whole array of statements in one HTTP request, so
+each route asks for everything it renders at once, through a loader in
+`src/lib/page-data.ts`:
+
+| route | statements | round trips |
+|---|---|---|
+| `/` | settings + meeting types | 1 |
+| `/[slug]` | type + settings + rules + overrides + busy | 1 (+1 for `generateMetadata`) |
+| `/booked/[token]`, `/api/ics/[token]` | booking + settings + types | 1 |
+| `/admin` | stats + two booking lists + settings + types | 1 |
+
+To keep that shape, reads in `settings.ts`, `schedule.ts`, `event-types.ts` and
+`bookings.ts` are each split into an exported statement and a pure row mapper.
+A loader composes the statements it needs into one batch and maps the result
+sets itself; the plain `getSettings()`-style functions are thin wrappers over
+the same pair, for callers with nothing to batch against. Adding a read to a
+page means adding its statement to that page's batch — not another `await`.
+
+Those wrappers are also memoized per request with React's `cache()`, which is
+only sound while nothing reads a value and then writes it inside one request —
+a server action and the re-render that follows it share one. Each file says so
+where the memo is defined; a new read-then-write action must not read through
+them.
+
+`/[slug]` would need a second hop to learn its event type's booking horizon
+before it could query the busy window, so it queries a deliberate superset
+instead (`MAX_HORIZON_DAYS`). Over-fetching busy intervals is safe because they
+only ever narrow availability, through an overlap test and a same-day count,
+both of which ignore intervals outside the horizon.
+
+Nothing is cached *across* requests: every page is `force-dynamic`, and a stale
+slot is worse than a slow one.
 
 ## the icon
 
@@ -96,18 +134,28 @@ first-run content (weekday 9–5 hours, three meeting types) only into genuinely
 empty tables.
 
 ```bash
-# apply the schema and print what came back
-bun --conditions=react-server run scripts/db-check.ts
+# print what's in the database; pass --apply to create and seed the tables
+bun run db:check
 
 # book the next open slot, assert it disappears, then clean up after itself
-bun --conditions=react-server run scripts/smoke-booking.ts
+bun run smoke -- --yes-write-to-real-db
 ```
 
-The `--conditions=react-server` flag is required: the lib modules import
-`server-only`, which throws unless the resolver picks its react-server entry
-the way Next does.
+Both go through `package.json` rather than being invoked directly, because the
+`--conditions=react-server` flag they carry is load-bearing and easy to forget:
+the lib modules import `server-only`, which throws unless the resolver picks
+its react-server entry the way Next does.
+
+`smoke` writes to whatever `TURSO_DATABASE_URL` points at, and `bun` auto-loads
+`.env` — so against the shared database it books a real slot. It refuses to run
+without `--yes-write-to-real-db` unless the URL is a local `file:` one, and it
+cleans up in a `finally` so an interrupted run can't leave a confirmed booking
+squatting on the host's next opening.
 
 ### env
+
+`cp .env.example .env` and fill it in — the template carries the names and the
+notes, never a value.
 
 ```
 TURSO_DATABASE_URL=
@@ -122,6 +170,11 @@ misconfigured deploy fails per-request naming the variable it wants, instead of
 failing the build with `URL_INVALID: The URL 'undefined' is not in a valid
 format`. A missing `ADMIN_KEY` disables admin login and warns once rather than
 throwing, so the public booking flow stays up.
+
+One asymmetry worth knowing: `NEXT_PUBLIC_SITE_URL` is inlined at *build* time,
+not read at runtime like the other three. Setting it only in the runtime
+environment has no effect — it has to be present when `next build` runs, or the
+hardcoded `https://coffee.justin06lee.dev` fallback ships instead.
 
 ## admin
 

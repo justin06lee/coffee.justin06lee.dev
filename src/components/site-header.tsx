@@ -29,8 +29,8 @@ export function SiteHeader({ trail = [], actions, className }: SiteHeaderProps) 
         >
           coffee
         </Link>
-        {trail.map((crumb, index) => (
-          <span key={index} className="flex min-w-0 items-center gap-2">
+        {trail.map((crumb) => (
+          <span key={crumb.label} className="flex min-w-0 items-center gap-2">
             <span aria-hidden className="text-white/20">
               /
             </span>
