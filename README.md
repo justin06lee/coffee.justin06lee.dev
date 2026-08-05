@@ -116,6 +116,13 @@ ADMIN_KEY=            # the admin password
 NEXT_PUBLIC_SITE_URL=
 ```
 
+None of these are needed to build. The libsql client connects on first use
+rather than at import, so `next build` succeeds with an empty environment and a
+misconfigured deploy fails per-request naming the variable it wants, instead of
+failing the build with `URL_INVALID: The URL 'undefined' is not in a valid
+format`. A missing `ADMIN_KEY` disables admin login and warns once rather than
+throwing, so the public booking flow stays up.
+
 ## admin
 
 `/login`, then `/admin`. The layout under `/admin` redirects when there is no
