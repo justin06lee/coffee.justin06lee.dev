@@ -3,10 +3,8 @@
 import { redirect } from "next/navigation";
 import { checkBookingRate } from "@/lib/auth";
 import { currentClientIp } from "@/lib/auth-server";
-import { availabilityFor, cancelByCancelToken, createBooking } from "@/lib/bookings";
-import { getEventType } from "@/lib/event-types";
-import { addDaysToDateKey, dateKeyInTimeZone, isValidTimeZone } from "@/lib/time";
-import { getSettings } from "@/lib/settings";
+import { cancelByCancelToken, createBooking } from "@/lib/bookings";
+import { isValidTimeZone } from "@/lib/time";
 
 /** Guest-supplied strings are bounded here, before anything reaches the database. */
 const LIMITS = {
@@ -69,36 +67,6 @@ export async function bookSlot(
 
   // redirect() throws, so it must sit outside any try/catch above it.
   redirect(`/booked/${result.booking.cancelToken}`);
-}
-
-/** Slots for a window, as absolute instants. The client groups them by the zone it's showing. */
-export async function fetchSlots(
-  eventTypeId: string,
-  fromDateKey: string,
-  toDateKey: string,
-): Promise<number[]> {
-  const eventType = await getEventType(eventTypeId);
-  if (!eventType || !eventType.active) return [];
-  const { days } = await availabilityFor(eventType, fromDateKey, toDateKey);
-  return days.flatMap((d) => d.slots);
-}
-
-/** The full bookable horizon for an event type, from today in the host's zone. */
-export async function fetchHorizon(eventTypeId: string): Promise<number[]> {
-  const eventType = await getEventType(eventTypeId);
-  if (!eventType || !eventType.active) return [];
-
-  // The window is derived here and the availability read made directly, rather
-  // than handing the ids back to `fetchSlots` — which would look the same event
-  // type up a second time to rebuild what this function already has.
-  const settings = await getSettings();
-  const today = dateKeyInTimeZone(Date.now(), settings.timeZone);
-  const { days } = await availabilityFor(
-    eventType,
-    today,
-    addDaysToDateKey(today, eventType.maxDaysAhead),
-  );
-  return days.flatMap((d) => d.slots);
 }
 
 export type CancelState = { error: string | null; done: boolean };

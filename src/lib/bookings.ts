@@ -436,13 +436,22 @@ export async function cancelByCancelToken(
 
 export type BookingWithType = Booking & { eventType: EventType | null };
 
+export type BookingsQuery = {
+  status?: "confirmed" | "cancelled";
+  from?: number;
+  to?: number;
+  limit?: number;
+  order?: "asc" | "desc";
+};
+
+/**
+ * `order` decides which end of the window the LIMIT keeps, not just how the
+ * rows are arranged. Looking backwards at a busy fortnight with `asc` returned
+ * the *oldest* rows and silently dropped the most recent ones — the opposite of
+ * what a "what just happened" list means. Callers reading history want `desc`.
+ */
 export function bookingsStatement(
-  {
-    status,
-    from,
-    to,
-    limit = 200,
-  }: { status?: "confirmed" | "cancelled"; from?: number; to?: number; limit?: number } = {},
+  { status, from, to, limit = 200, order = "asc" }: BookingsQuery = {},
 ): InStatement {
   const clauses: string[] = [];
   const args: (string | number)[] = [];
@@ -460,9 +469,14 @@ export function bookingsStatement(
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
+  // Interpolated because SQLite cannot parameterize a sort direction; the union
+  // type is the allowlist, and this re-narrows it so a widened type can't leak
+  // arbitrary SQL in here later.
+  const direction = order === "desc" ? "DESC" : "ASC";
+
   return {
     sql: `SELECT b.* FROM coffee_bookings b ${where}
-          ORDER BY b.start_at ASC LIMIT ?`,
+          ORDER BY b.start_at ${direction} LIMIT ?`,
     args: [...args, limit],
   };
 }
@@ -482,12 +496,7 @@ export function bookingsFromRows(rows: Row[]): Booking[] {
  * the row still has to render its title.
  */
 export async function listBookings(
-  opts: {
-    status?: "confirmed" | "cancelled";
-    from?: number;
-    to?: number;
-    limit?: number;
-  } = {},
+  opts: BookingsQuery = {},
 ): Promise<BookingWithType[]> {
   await initDb();
   const [bookingsResult, typesResult] = await db.batch([
