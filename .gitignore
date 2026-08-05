@@ -24,6 +24,11 @@
 .DS_Store
 *.pem
 
+# derived icons — generated from design/favicon/*.svg by scripts/build-icons.mjs
+# on every dev/build, so the binary never drifts from the drawing
+/src/app/apple-icon.png
+__pycache__/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

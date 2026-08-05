@@ -21,6 +21,42 @@ bun run build
 | `src/components/chrome/` | vendored chrome components — owned code, edit freely |
 | `src/app/[slug]/` | the public booking flow |
 | `src/app/admin/` | availability, meeting types, bookings |
+| `design/favicon/` | the icon generator and its SVG output |
+
+## the icon
+
+`design/favicon/generate.py` raymarches a cup and samples it onto a character
+grid, the way the donut icons on the sibling sites work. It emits two variants,
+and the tuning is aimed at 16px rather than at the artboard — at tab size the
+ascii texture has averaged away and only the silhouette and the coarse
+light-to-dark structure survive.
+
+| variant | output | why |
+|---|---|---|
+| `--variant adaptive` | `src/app/icon.svg` | transparent; recolours the ink under `prefers-color-scheme` |
+| `--variant opaque` | `design/favicon/apple-icon.svg` | black disc baked in; feeds the PNG |
+
+The adaptive one swaps ink colour rather than inverting the opacity ramp. A
+correct inversion is what a light ground would physically call for, and it
+fails here: the rim term makes the silhouette the *brightest* part of the mark,
+so inverting erases the outline. Note that this trick needs SVG-favicon support
+to land — Chrome, Firefox and Edge honour it; Apple platforms fall back to the
+touch icon, which is why that one keeps its disc.
+
+Only SVG is committed. `src/app/apple-icon.png` is derived by
+`scripts/build-icons.mjs` (sharp) and gitignored, so the binary cannot drift
+from the drawing:
+
+```sh
+bun run icons     # also runs automatically before dev and build
+```
+
+Regenerate the SVGs after editing the generator:
+
+```sh
+python3 design/favicon/generate.py --variant adaptive > src/app/icon.svg
+python3 design/favicon/generate.py --variant opaque > design/favicon/apple-icon.svg
+```
 
 ## the three time types
 
