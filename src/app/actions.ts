@@ -3,7 +3,7 @@
 import { redirect } from "next/navigation";
 import { checkBookingRate } from "@/lib/auth";
 import { currentClientIp } from "@/lib/auth-server";
-import { availabilityFor, createBooking, getBookingByCancelToken, cancelBooking } from "@/lib/bookings";
+import { availabilityFor, cancelByCancelToken, createBooking } from "@/lib/bookings";
 import { getEventType } from "@/lib/event-types";
 import { addDaysToDateKey, dateKeyInTimeZone, isValidTimeZone } from "@/lib/time";
 import { getSettings } from "@/lib/settings";
@@ -87,13 +87,18 @@ export async function fetchSlots(
 export async function fetchHorizon(eventTypeId: string): Promise<number[]> {
   const eventType = await getEventType(eventTypeId);
   if (!eventType || !eventType.active) return [];
+
+  // The window is derived here and the availability read made directly, rather
+  // than handing the ids back to `fetchSlots` — which would look the same event
+  // type up a second time to rebuild what this function already has.
   const settings = await getSettings();
   const today = dateKeyInTimeZone(Date.now(), settings.timeZone);
-  return fetchSlots(
-    eventTypeId,
+  const { days } = await availabilityFor(
+    eventType,
     today,
     addDaysToDateKey(today, eventType.maxDaysAhead),
   );
+  return days.flatMap((d) => d.slots);
 }
 
 export type CancelState = { error: string | null; done: boolean };
@@ -105,13 +110,21 @@ export async function cancelByToken(
   const token = String(formData.get("token") ?? "");
   const reason = String(formData.get("reason") ?? "").trim();
 
-  const booking = await getBookingByCancelToken(token);
-  if (!booking) return { error: "we couldn't find that booking.", done: false };
-  if (booking.status === "cancelled") return { error: null, done: true };
-  if (booking.startAt < Date.now()) {
+  // One round trip decides and reports: the write and the read-back ride in a
+  // single transaction, so nothing can slip between looking the booking up and
+  // cancelling it. "cancelled" covers the already-cancelled case too, which is
+  // the same reply the guest got when that was a branch of its own.
+  const outcome = await cancelByCancelToken(
+    token,
+    reason.slice(0, LIMITS.notes) || null,
+    Date.now(),
+  );
+
+  if (outcome === "not-found") {
+    return { error: "we couldn't find that booking.", done: false };
+  }
+  if (outcome === "past") {
     return { error: "that meeting has already happened.", done: false };
   }
-
-  await cancelBooking(booking.id, reason.slice(0, LIMITS.notes) || null);
   return { error: null, done: true };
 }

@@ -2,21 +2,13 @@ import { CalendarCheck, CalendarX, CalendarDays, Users } from "lucide-react";
 import { EmptyState } from "@/components/chrome/empty-state";
 import { StatTile } from "@/components/chrome/stat-tile";
 import { BookingList } from "@/components/booking-list";
-import { bookingStats, listBookings } from "@/lib/bookings";
-import { getSettings } from "@/lib/settings";
+import { adminOverview } from "@/lib/page-data";
 
 export const dynamic = "force-dynamic";
 
 export default async function AdminBookingsPage() {
   const now = Date.now();
-  const [stats, upcoming, recent, settings] = await Promise.all([
-    bookingStats(now),
-    listBookings({ status: "confirmed", from: now, limit: 100 }),
-    // A short look backwards: the last fortnight is enough to answer "who did
-    // I just talk to" without paging.
-    listBookings({ to: now, from: now - 14 * 24 * 60 * 60_000, limit: 50 }),
-    getSettings(),
-  ]);
+  const { stats, upcoming, recent, settings } = await adminOverview(now);
 
   return (
     <div className="flex flex-col gap-10">

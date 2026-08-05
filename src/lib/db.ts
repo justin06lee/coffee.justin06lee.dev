@@ -1,5 +1,5 @@
 import "server-only";
-import { createClient, type Client } from "@libsql/client";
+import { createClient, type Client, type InStatement } from "@libsql/client";
 
 /**
  * The same Turso database every justin06lee.dev site talks to, so every table
@@ -58,12 +58,22 @@ export const db: Client = new Proxy({} as Client, {
 let initPromise: Promise<void> | null = null;
 
 export function initDb(): Promise<void> {
-  if (!initPromise) initPromise = doInit();
+  // A rejection must not be memoized: caching a failed promise would let one
+  // transient connection error poison the worker for the rest of its life.
+  if (!initPromise) {
+    initPromise = doInit().catch((err: unknown) => {
+      initPromise = null;
+      throw err;
+    });
+  }
   return initPromise;
 }
 
 async function doInit(): Promise<void> {
-  await db.batch([
+  // The schema and the seed probe go out as one batch — one HTTP round trip
+  // instead of three. Every statement below is IF NOT EXISTS, so the tables
+  // the probe counts are guaranteed to exist by the time it runs.
+  const results = await db.batch([
     `CREATE TABLE IF NOT EXISTS coffee_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
@@ -159,24 +169,36 @@ async function doInit(): Promise<void> {
       count INTEGER NOT NULL,
       first_attempt INTEGER NOT NULL
     )`,
+    `SELECT
+      (SELECT COUNT(*) FROM coffee_availability_rules) AS rules,
+      (SELECT COUNT(*) FROM coffee_event_types) AS types`,
   ]);
 
-  await seed();
+  // The probe is the last statement, so its counts are the last result set.
+  const counts = results[results.length - 1].rows[0] as unknown as {
+    rules: number;
+    types: number;
+  };
+
+  await seed(Number(counts.rules) === 0, Number(counts.types) === 0);
 }
 
 /**
  * First-run content. Each block is guarded on its own table being empty rather
  * than on a global "seeded" flag, so deleting every event type and starting
  * over doesn't silently resurrect the defaults on the next deploy — only a
- * genuinely fresh table gets them.
+ * genuinely fresh table gets them. The guards are evaluated by the caller's
+ * probe; whatever they let through ships as one batch.
  */
-async function seed(): Promise<void> {
-  const now = Date.now();
+async function seed(seedRules: boolean, seedTypes: boolean): Promise<void> {
+  if (!seedRules && !seedTypes) return;
 
-  const rules = await db.execute("SELECT COUNT(*) AS n FROM coffee_availability_rules");
-  if (Number((rules.rows[0] as unknown as { n: number }).n) === 0) {
-    await db.batch(
-      [1, 2, 3, 4, 5].map((weekday) => ({
+  const now = Date.now();
+  const statements: InStatement[] = [];
+
+  if (seedRules) {
+    statements.push(
+      ...[1, 2, 3, 4, 5].map((weekday) => ({
         sql: `INSERT INTO coffee_availability_rules
                 (id, weekday, start_min, end_min, created_at, updated_at)
               VALUES (?, ?, ?, ?, ?, ?)`,
@@ -185,8 +207,7 @@ async function seed(): Promise<void> {
     );
   }
 
-  const types = await db.execute("SELECT COUNT(*) AS n FROM coffee_event_types");
-  if (Number((types.rows[0] as unknown as { n: number }).n) === 0) {
+  if (seedTypes) {
     const defaults = [
       {
         slug: "coffee",
@@ -210,8 +231,8 @@ async function seed(): Promise<void> {
         position: 2,
       },
     ];
-    await db.batch(
-      defaults.map((d) => ({
+    statements.push(
+      ...defaults.map((d) => ({
         sql: `INSERT INTO coffee_event_types
                 (id, slug, title, blurb, duration_min, increment_min,
                  buffer_before_min, buffer_after_min, min_notice_min,
@@ -231,6 +252,8 @@ async function seed(): Promise<void> {
       })),
     );
   }
+
+  await db.batch(statements, "write");
 }
 
 /* ── row shapes ── */

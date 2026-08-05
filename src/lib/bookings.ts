@@ -1,4 +1,5 @@
 import "server-only";
+import type { InStatement, Row } from "@libsql/client";
 import { db, initDb, type DbBooking } from "./db";
 import {
   type BusyInterval,
@@ -8,9 +9,20 @@ import {
   type DayAvailability,
 } from "./availability";
 import type { EventType } from "./event-types";
-import { getEventType } from "./event-types";
-import { listOverrides, listRules } from "./schedule";
-import { getSettings, type Settings } from "./settings";
+import {
+  eventTypeByIdStatement,
+  eventTypesFromRows,
+  eventTypesStatement,
+} from "./event-types";
+import {
+  overridesFromRows,
+  overridesStatement,
+  rulesFromRows,
+  rulesStatement,
+  type StoredOverride,
+  type StoredRule,
+} from "./schedule";
+import { settingsFromRows, settingsStatement, type Settings } from "./settings";
 import {
   type DateKey,
   addDaysToDateKey,
@@ -55,6 +67,19 @@ function toBooking(row: DbBooking): Booking {
 }
 
 /**
+ * Reads are split into a statement builder and a mapper so a page-level loader
+ * can put them in a `db.batch` alongside its other reads — one HTTP round trip
+ * for the whole page — without copying the SQL and letting the two drift apart.
+ * The mappers stay pure: no `db`, no clock, so they work on rows from anywhere.
+ */
+
+/**
+ * Widen every busy query by a day either side so a booking that starts before
+ * the window but whose trailing buffer reaches into it is still caught.
+ */
+const BUSY_PAD_MS = 24 * 60 * 60_000;
+
+/**
  * Confirmed bookings overlapping a window, already padded with the buffers of
  * the event type each one belongs to.
  *
@@ -63,30 +88,36 @@ function toBooking(row: DbBooking): Booking {
  * buffer on a code review has to keep the following coffee slot clear even
  * though coffee itself declares no buffer.
  */
-export async function busyBetween(from: number, to: number): Promise<BusyInterval[]> {
-  await initDb();
-  // Widen the query by a day either side so a booking that starts before the
-  // window but whose trailing buffer reaches into it is still caught.
-  const pad = 24 * 60 * 60_000;
-  const result = await db.execute({
+export function busyStatement(from: number, to: number): InStatement {
+  return {
     sql: `SELECT b.start_at, b.end_at,
                  e.buffer_before_min AS bb, e.buffer_after_min AS ba
           FROM coffee_bookings b
           LEFT JOIN coffee_event_types e ON e.id = b.event_type_id
           WHERE b.status = 'confirmed' AND b.end_at > ? AND b.start_at < ?`,
-    args: [from - pad, to + pad],
-  });
-  return (
-    result.rows as unknown as {
-      start_at: number;
-      end_at: number;
-      bb: number | null;
-      ba: number | null;
-    }[]
-  ).map((r) => ({
+    args: [from - BUSY_PAD_MS, to + BUSY_PAD_MS],
+  };
+}
+
+type DbBusyRow = {
+  start_at: number;
+  end_at: number;
+  bb: number | null;
+  ba: number | null;
+};
+
+export function busyFromRows(rows: Row[]): BusyInterval[] {
+  return (rows as unknown as DbBusyRow[]).map((r) => ({
     start: r.start_at - (r.bb ?? 0) * 60_000,
     end: r.end_at + (r.ba ?? 0) * 60_000,
   }));
+}
+
+/** The standalone read, for callers with nothing else to batch it with. */
+export async function busyBetween(from: number, to: number): Promise<BusyInterval[]> {
+  await initDb();
+  const result = await db.execute(busyStatement(from, to));
+  return busyFromRows(result.rows);
 }
 
 /** The slot-engine options implied by an event type plus host settings. */
@@ -115,21 +146,74 @@ export async function availabilityFor(
   to: DateKey,
   now = Date.now(),
 ): Promise<{ days: DayAvailability[]; settings: Settings }> {
-  const settings = await getSettings();
-  if (!settings.bookingsOpen) return { days: [], settings };
+  await initDb();
 
-  const [rules, overrides] = await Promise.all([listRules(), listOverrides()]);
-  const options = slotOptionsFor(eventType, settings, now);
-
-  // The busy window is the span itself plus the horizon needed by buffers.
+  // The busy window is the span itself plus the horizon needed by buffers. It
+  // comes from the DateKey arguments alone, so it doesn't have to wait on
+  // settings — which makes all four reads independent, and one batch.
   const spanStart = new Date(`${from}T00:00:00Z`).getTime();
   const spanEnd = new Date(`${addDaysToDateKey(to, 1)}T00:00:00Z`).getTime();
-  const busy = await busyBetween(spanStart, spanEnd);
+
+  const [settingsResult, rulesResult, overridesResult, busyResult] = await db.batch([
+    settingsStatement,
+    rulesStatement,
+    overridesStatement(),
+    busyStatement(spanStart, spanEnd),
+  ]);
+
+  const settings = settingsFromRows(settingsResult.rows);
+  // A closed calendar throws away the other three result sets, which is still
+  // strictly cheaper than the round trip it would take to learn that first.
+  if (!settings.bookingsOpen) return { days: [], settings };
+
+  const options = slotOptionsFor(eventType, settings, now);
 
   return {
-    days: slotsForRange(from, to, options, rules, overrides, busy),
+    days: slotsForRange(
+      from,
+      to,
+      options,
+      rulesFromRows(rulesResult.rows),
+      overridesFromRows(overridesResult.rows),
+      busyFromRows(busyResult.rows),
+    ),
     settings,
   };
+}
+
+/** Widest busy window any event type can need: maxDaysAhead is capped at 365. */
+export const MAX_HORIZON_DAYS = 366;
+
+/**
+ * Busy intervals covering the whole horizon, for a page that batches before it
+ * knows the event type's maxDaysAhead. Over-fetching is safe for the same
+ * reason the superset window in `createBooking` is — see the comment there.
+ */
+export function horizonBusyStatement(now: number): InStatement {
+  return busyStatement(now, now + MAX_HORIZON_DAYS * 24 * 60 * 60_000);
+}
+
+/**
+ * Every bookable start over an event type's horizon, flattened — the shape
+ * `/[slug]` renders. Pure, so a page can compute it from one batch's rows.
+ */
+export function horizonSlots(
+  eventType: EventType,
+  settings: Settings,
+  rules: StoredRule[],
+  overrides: StoredOverride[],
+  busy: BusyInterval[],
+  now: number,
+): number[] {
+  const today = dateKeyInTimeZone(now, settings.timeZone);
+  return slotsForRange(
+    today,
+    addDaysToDateKey(today, eventType.maxDaysAhead),
+    slotOptionsFor(eventType, settings, now),
+    rules,
+    overrides,
+    busy,
+  ).flatMap((d) => d.slots);
 }
 
 export type BookingResult =
@@ -144,6 +228,13 @@ export type BookingInput = {
   guestTimeZone: string;
   notes: string | null;
 };
+
+/**
+ * The longest meeting the admin form can define is 8 hours; a day is the round
+ * number safely above it, and what the busy window is widened to so it can be
+ * built before the event type's duration is known.
+ */
+const MAX_MEETING_MS = 24 * 60 * 60_000;
 
 /**
  * Commit a booking, re-deriving availability from the rules rather than
@@ -162,12 +253,31 @@ export async function createBooking(
 ): Promise<BookingResult> {
   await initDb();
 
-  const eventType = await getEventType(input.eventTypeId);
+  // All five reads go out together, which means the busy window has to be
+  // chosen before the duration is known. It asks for a deliberate superset:
+  // `busyStatement` pads ±24h, so this spans [startAt - 24h, startAt + 48h],
+  // which contains the true [startAt - 24h, startAt + duration + 24h] for any
+  // duration up to a day. The extra intervals change nothing downstream —
+  // `isSlotBookable` only asks whether an interval overlaps the guarded span,
+  // and ones outside it don't; the daily-limit count only keeps intervals
+  // whose start falls on the slot's own date, and the ±24h pad already spanned
+  // that whole host-local day, so widening the far end only admits intervals
+  // starting on later dates, which never match.
+  const [typeResult, settingsResult, rulesResult, overridesResult, busyResult] =
+    await db.batch([
+      eventTypeByIdStatement(input.eventTypeId),
+      settingsStatement,
+      rulesStatement,
+      overridesStatement(),
+      busyStatement(input.startAt, input.startAt + MAX_MEETING_MS),
+    ]);
+
+  const eventType = eventTypesFromRows(typeResult.rows)[0] ?? null;
   if (!eventType || !eventType.active) {
     return { ok: false, reason: "that meeting type isn't available anymore." };
   }
 
-  const settings = await getSettings();
+  const settings = settingsFromRows(settingsResult.rows);
   if (!settings.bookingsOpen) {
     return { ok: false, reason: settings.closedMessage };
   }
@@ -176,10 +286,11 @@ export async function createBooking(
     ? input.guestTimeZone
     : settings.timeZone;
 
-  const [rules, overrides] = await Promise.all([listRules(), listOverrides()]);
+  const rules = rulesFromRows(rulesResult.rows);
+  const overrides = overridesFromRows(overridesResult.rows);
+  const busy = busyFromRows(busyResult.rows);
   const options = slotOptionsFor(eventType, settings, now);
   const endAt = input.startAt + eventType.durationMin * 60_000;
-  const busy = await busyBetween(input.startAt, endAt);
 
   if (!isSlotBookable(input.startAt, options, rules, overrides, busy)) {
     return { ok: false, reason: "that slot just went away. pick another one." };
@@ -255,12 +366,13 @@ export async function getBooking(id: string): Promise<Booking | null> {
   return row ? toBooking(row) : null;
 }
 
+export function bookingByCancelTokenStatement(token: string): InStatement {
+  return { sql: "SELECT * FROM coffee_bookings WHERE cancel_token = ?", args: [token] };
+}
+
 export async function getBookingByCancelToken(token: string): Promise<Booking | null> {
   await initDb();
-  const result = await db.execute({
-    sql: "SELECT * FROM coffee_bookings WHERE cancel_token = ?",
-    args: [token],
-  });
+  const result = await db.execute(bookingByCancelTokenStatement(token));
   const row = (result.rows as unknown as DbBooking[])[0];
   return row ? toBooking(row) : null;
 }
@@ -279,17 +391,59 @@ export async function cancelBooking(
   });
 }
 
+export type CancelOutcome = "cancelled" | "not-found" | "past";
+
+/**
+ * Cancel by token, and say which of the three things happened, in one round
+ * trip — the guest-facing cancel form needs the distinction to word its reply.
+ *
+ * The write is attempted first and the state read back after it. Both ride in
+ * one transaction, so the SELECT observes the UPDATE: nothing can slip between
+ * looking the booking up and acting on it.
+ */
+export async function cancelByCancelToken(
+  token: string,
+  reason: string | null,
+  now = Date.now(),
+): Promise<CancelOutcome> {
+  await initDb();
+  const [, after] = await db.batch(
+    [
+      {
+        sql: `UPDATE coffee_bookings
+              SET status = 'cancelled', cancelled_at = ?, cancel_reason = ?, updated_at = ?
+              WHERE cancel_token = ? AND status = 'confirmed' AND start_at >= ?`,
+        args: [now, reason, now, token, now],
+      },
+      {
+        sql: "SELECT status, start_at FROM coffee_bookings WHERE cancel_token = ?",
+        args: [token],
+      },
+    ],
+    "write",
+  );
+
+  const row = (after.rows as unknown as { status: string }[])[0];
+  if (!row) return "not-found";
+  // One answer for "we just cancelled it" and "it was already cancelled": the
+  // guest is told the same thing either way, and can't tell them apart anyway.
+  if (row.status === "cancelled") return "cancelled";
+  // Still confirmed, and the row exists — so the token matched and `status =
+  // 'confirmed'` matched. `start_at >= ?` is the only clause left that can have
+  // held the UPDATE back, which means the meeting has already happened.
+  return "past";
+}
+
 export type BookingWithType = Booking & { eventType: EventType | null };
 
-export async function listBookings(
+export function bookingsStatement(
   {
     status,
     from,
     to,
     limit = 200,
   }: { status?: "confirmed" | "cancelled"; from?: number; to?: number; limit?: number } = {},
-): Promise<BookingWithType[]> {
-  await initDb();
+): InStatement {
   const clauses: string[] = [];
   const args: (string | number)[] = [];
   if (status) {
@@ -306,33 +460,60 @@ export async function listBookings(
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
-  const result = await db.execute({
+  return {
     sql: `SELECT b.* FROM coffee_bookings b ${where}
           ORDER BY b.start_at ASC LIMIT ?`,
     args: [...args, limit],
-  });
+  };
+}
 
-  const bookings = (result.rows as unknown as DbBooking[]).map(toBooking);
-  const typeIds = [...new Set(bookings.map((b) => b.eventTypeId))];
-  const types = new Map(
-    (await Promise.all(typeIds.map((id) => getEventType(id))))
-      .filter((t): t is EventType => t !== null)
-      .map((t) => [t.id, t]),
-  );
+export function bookingsFromRows(rows: Row[]): Booking[] {
+  return (rows as unknown as DbBooking[]).map(toBooking);
+}
 
-  return bookings.map((b) => ({ ...b, eventType: types.get(b.eventTypeId) ?? null }));
+/**
+ * The admin list, with each booking's type attached.
+ *
+ * The types come back as one extra statement in the same batch rather than a
+ * lookup per distinct id: there are a handful of them, so fetching the lot and
+ * joining in memory is cheaper than the N queries it replaces, and it stays
+ * one round trip however many types the page spans. Inactive types are
+ * included because a booking can legitimately point at an archived one, and
+ * the row still has to render its title.
+ */
+export async function listBookings(
+  opts: {
+    status?: "confirmed" | "cancelled";
+    from?: number;
+    to?: number;
+    limit?: number;
+  } = {},
+): Promise<BookingWithType[]> {
+  await initDb();
+  const [bookingsResult, typesResult] = await db.batch([
+    bookingsStatement(opts),
+    eventTypesStatement({ includeInactive: true }),
+  ]);
+
+  const types = new Map(eventTypesFromRows(typesResult.rows).map((t) => [t.id, t]));
+
+  return bookingsFromRows(bookingsResult.rows).map((b) => ({
+    ...b,
+    eventType: types.get(b.eventTypeId) ?? null,
+  }));
 }
 
 /** Counts for the admin dashboard tiles. */
-export async function bookingStats(now = Date.now()): Promise<{
+export type BookingStats = {
   upcoming: number;
   thisWeek: number;
   cancelled: number;
   total: number;
-}> {
-  await initDb();
+};
+
+export function bookingStatsStatement(now: number): InStatement {
   const weekOut = now + 7 * 24 * 60 * 60_000;
-  const result = await db.execute({
+  return {
     sql: `SELECT
             SUM(CASE WHEN status = 'confirmed' AND start_at >= ? THEN 1 ELSE 0 END) AS upcoming,
             SUM(CASE WHEN status = 'confirmed' AND start_at >= ? AND start_at < ? THEN 1 ELSE 0 END) AS this_week,
@@ -340,17 +521,29 @@ export async function bookingStats(now = Date.now()): Promise<{
             COUNT(*) AS total
           FROM coffee_bookings`,
     args: [now, now, weekOut],
-  });
-  const row = result.rows[0] as unknown as {
-    upcoming: number | null;
-    this_week: number | null;
-    cancelled: number | null;
-    total: number | null;
   };
+}
+
+export function bookingStatsFromRows(rows: Row[]): BookingStats {
+  // An empty table still returns a row, but SUM over no rows is NULL.
+  const row = rows[0] as unknown as
+    | {
+        upcoming: number | null;
+        this_week: number | null;
+        cancelled: number | null;
+        total: number | null;
+      }
+    | undefined;
   return {
-    upcoming: Number(row.upcoming ?? 0),
-    thisWeek: Number(row.this_week ?? 0),
-    cancelled: Number(row.cancelled ?? 0),
-    total: Number(row.total ?? 0),
+    upcoming: Number(row?.upcoming ?? 0),
+    thisWeek: Number(row?.this_week ?? 0),
+    cancelled: Number(row?.cancelled ?? 0),
+    total: Number(row?.total ?? 0),
   };
+}
+
+export async function bookingStats(now = Date.now()): Promise<BookingStats> {
+  await initDb();
+  const result = await db.execute(bookingStatsStatement(now));
+  return bookingStatsFromRows(result.rows);
 }
