@@ -19,8 +19,13 @@ light-to-dark structure. That drives three choices below: a wide tonal range
 (the first pass sat in a narrow grey band and averaged to a smudge), a rim term
 that traces the outline, and a handle fat enough to keep its hole open.
 
-    python3 design/favicon/generate.py > src/app/icon.svg
+Two variants come out of this, and only SVG is ever committed — the PNG Apple
+insists on is derived at build time by scripts/build-icons.mjs:
+
+    python3 design/favicon/generate.py --variant adaptive > src/app/icon.svg
+    python3 design/favicon/generate.py --variant opaque > design/favicon/apple-icon.svg
 """
+import argparse
 import math
 import sys
 
@@ -190,21 +195,8 @@ def glyph(level, cx, cy):
     return [rect(0.35, 0.35, 4.3, 4.3)]  # $ @
 
 
-def main():
-    out = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEW:.0f} {VIEW:.0f}"'
-        f' width="{VIEW:.0f}" height="{VIEW:.0f}">',
-        "<title>coffee</title>",
-        # The disc is the whole background; outside it stays transparent, the
-        # way the donut icons on the other sites do it. It is load-bearing, not
-        # decoration: the cup is drawn in white ink only, so dropping the disc
-        # makes the icon invisible against a light tab bar. Anything that wants
-        # a transparent background has to invert the ramp under
-        # prefers-color-scheme first, not just delete the circle.
-        f'<circle cx="{VIEW / 2:.0f}" cy="{VIEW / 2:.0f}"'
-        f' r="{DISC * VIEW / 2:.2f}" fill="#000000"/>',
-    ]
-
+def render():
+    """Trace the whole grid once, returning {level: [path commands]}."""
     buckets = {}
     for row in range(N):
         for col in range(N):
@@ -217,18 +209,63 @@ def main():
             if level <= 0:
                 continue
             buckets.setdefault(level, []).extend(glyph(level, cx, cy))
+    return buckets
 
-    for level in sorted(buckets):
-        # The floor is low on purpose: the faintest glyphs have to actually
-        # recede, or every cell contributes ink and the disc fills in.
-        opacity = 0.13 + 0.87 * (level / LEVELS)
-        out.append(
-            f'<path fill="#ffffff" fill-opacity="{opacity:.2f}"'
-            f' d="{"".join(buckets[level])}"/>'
-        )
 
+def opacity_for(level):
+    # The floor is low on purpose: the faintest glyphs have to actually
+    # recede, or every cell contributes ink and the disc fills in.
+    return 0.13 + 0.87 * (level / LEVELS)
+
+
+def build(variant):
+    buckets = render()
+    levels = sorted(buckets)
+
+    # One class per level rather than a fill-opacity attribute per path, so the
+    # stylesheet can restyle the whole mark from one rule. It is also fewer
+    # bytes: the opacity is stated once instead of on every path.
+    rules = ["path{fill:#fff}"]
+    rules += [f".l{level}{{fill-opacity:{opacity_for(level):.2f}}}"
+              for level in levels]
+
+    if variant == "adaptive":
+        # Swap the ink instead of inverting the ramp. Inverting is what a
+        # physically-correct rendering on a light ground would do, and it fails
+        # here: the rim term deliberately makes the silhouette the *brightest*
+        # part of the mark, so inverting erases the outline and leaves a pale
+        # smudge. Keeping the ramp and recolouring gives a tonal negative, but
+        # the silhouette, the rim and the texture all survive.
+        rules.append("@media(prefers-color-scheme:light){path{fill:#111}}")
+
+    out = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {VIEW:.0f} {VIEW:.0f}"'
+        f' width="{VIEW:.0f}" height="{VIEW:.0f}">',
+        "<title>coffee</title>",
+        "<style>" + "".join(rules) + "</style>",
+    ]
+
+    if variant == "opaque":
+        # The disc is load-bearing, not decoration: the cup is white ink only,
+        # so on a light ground it needs something to sit on. The adaptive
+        # variant solves that by recolouring the ink and drops the disc; this
+        # one keeps it, because it feeds a PNG that cannot carry a media query.
+        out.append(f'<circle cx="{VIEW / 2:.0f}" cy="{VIEW / 2:.0f}"'
+                   f' r="{DISC * VIEW / 2:.2f}" fill="#000000"/>')
+
+    out += [f'<path class="l{level}" d="{"".join(buckets[level])}"/>'
+            for level in levels]
     out.append("</svg>")
-    sys.stdout.write("\n".join(out) + "\n")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--variant", choices=("adaptive", "opaque"), default="adaptive",
+        help="adaptive: transparent, recolours under prefers-color-scheme. "
+             "opaque: black disc, for rasterising to a PNG.")
+    sys.stdout.write(build(parser.parse_args().variant))
 
 
 if __name__ == "__main__":
