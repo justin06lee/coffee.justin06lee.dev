@@ -1,5 +1,5 @@
 import "server-only";
-import { createClient } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 
 /**
  * The same Turso database every justin06lee.dev site talks to, so every table
@@ -7,9 +7,49 @@ import { createClient } from "@libsql/client";
  * reusing the shared `sessions` one: the sites share an ADMIN_KEY but there is
  * no reason a token lifted from one should unlock another.
  */
-export const db = createClient({
-  url: process.env.TURSO_DATABASE_URL!,
-  authToken: process.env.TURSO_AUTH_TOKEN!,
+
+let client: Client | null = null;
+
+function connect(): Client {
+  const url = process.env.TURSO_DATABASE_URL;
+  const authToken = process.env.TURSO_AUTH_TOKEN;
+
+  if (!url) {
+    throw new Error(
+      "TURSO_DATABASE_URL is not set. Set it and TURSO_AUTH_TOKEN in the " +
+        "environment — .env locally, project environment variables on Vercel.",
+    );
+  }
+  // Only the scheme goes in the message. A Turso URL can carry credentials in
+  // the query string, and this error is going to end up in a build log.
+  if (!authToken && !url.startsWith("file:")) {
+    throw new Error(
+      `TURSO_AUTH_TOKEN is not set, but TURSO_DATABASE_URL is remote ` +
+        `(${url.split(":")[0]}:). A remote Turso database requires a token.`,
+    );
+  }
+
+  return createClient({ url, authToken });
+}
+
+/**
+ * Connects on first use rather than at import.
+ *
+ * This is a Proxy so the ~40 `db.execute(...)` call sites stay as they are,
+ * but the point is the timing, not the shape: built at module scope, a missing
+ * env var took down `next build` itself, because collecting page data imports
+ * this file. A deploy configured in the wrong order failed with
+ * `URL_INVALID: The URL 'undefined' is not in a valid format` and no clue
+ * which variable was meant. Now the build succeeds without any database
+ * config, and a genuinely misconfigured deploy fails per-request, naming the
+ * variable it wants.
+ */
+export const db: Client = new Proxy({} as Client, {
+  get(_target, prop) {
+    client ??= connect();
+    const value = Reflect.get(client, prop, client);
+    return typeof value === "function" ? value.bind(client) : value;
+  },
 });
 
 // Memoize so initDb() costs ~0 after the first call in a worker process.
