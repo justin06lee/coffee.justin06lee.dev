@@ -33,7 +33,13 @@ export default async function BookedPage({ params }: Props) {
 
   const cancelled = booking.status === "cancelled";
   const past = booking.startAt < Date.now();
-  const location = eventType?.locationDetail || eventType?.location || settings.defaultLocation;
+  // `eventType.location` is deliberately not in this chain. It is the coarse
+  // category word and always has a value ("video"), so including it made
+  // `defaultLocation` unreachable — while the event-type editor shows
+  // `defaultLocation` as the placeholder for a blank detail, promising exactly
+  // the fallback that could never fire. A guest was shown the literal string
+  // "video" instead of the host's default.
+  const location = eventType?.locationDetail || settings.defaultLocation;
   const title = eventType?.title ?? "meeting";
 
   return (

@@ -13,8 +13,15 @@ export default async function AdminBookingsPage() {
     bookingStats(now),
     listBookings({ status: "confirmed", from: now, limit: 100 }),
     // A short look backwards: the last fortnight is enough to answer "who did
-    // I just talk to" without paging.
-    listBookings({ to: now, from: now - 14 * 24 * 60 * 60_000, limit: 50 }),
+    // I just talk to" without paging. Ordered newest-first because the limit
+    // cuts from the far end — ascending kept the fortnight's *oldest* fifty and
+    // dropped exactly the meetings this list exists to show.
+    listBookings({
+      to: now,
+      from: now - 14 * 24 * 60 * 60_000,
+      limit: 50,
+      order: "desc",
+    }),
     getSettings(),
   ]);
 

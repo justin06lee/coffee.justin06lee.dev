@@ -281,13 +281,26 @@ export async function cancelBooking(
 
 export type BookingWithType = Booking & { eventType: EventType | null };
 
+/**
+ * `order` decides which end of the window the LIMIT keeps, not just how the
+ * rows are arranged. Looking backwards at a busy fortnight with `asc` returned
+ * the *oldest* rows and silently dropped the most recent ones — the opposite of
+ * what a "what just happened" list means. Callers reading history want `desc`.
+ */
 export async function listBookings(
   {
     status,
     from,
     to,
     limit = 200,
-  }: { status?: "confirmed" | "cancelled"; from?: number; to?: number; limit?: number } = {},
+    order = "asc",
+  }: {
+    status?: "confirmed" | "cancelled";
+    from?: number;
+    to?: number;
+    limit?: number;
+    order?: "asc" | "desc";
+  } = {},
 ): Promise<BookingWithType[]> {
   await initDb();
   const clauses: string[] = [];
@@ -306,9 +319,14 @@ export async function listBookings(
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
 
+  // Interpolated because SQLite cannot parameterize a sort direction; the union
+  // type is the allowlist, and this re-narrows it so a widened type can't leak
+  // arbitrary SQL in here later.
+  const direction = order === "desc" ? "DESC" : "ASC";
+
   const result = await db.execute({
     sql: `SELECT b.* FROM coffee_bookings b ${where}
-          ORDER BY b.start_at ASC LIMIT ?`,
+          ORDER BY b.start_at ${direction} LIMIT ?`,
     args: [...args, limit],
   });
 
