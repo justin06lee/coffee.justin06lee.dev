@@ -25,10 +25,18 @@ const SIZE = 180; // what iOS asks for; it downsamples from here itself
 let sharp;
 try {
   ({ default: sharp } = await import("sharp"));
-} catch {
+} catch (err) {
+  // Two very different failures land here and they want opposite fixes. Sharp
+  // missing from node_modules is one install away; "Could not load the sharp
+  // module using the darwin-arm64 runtime" means it is installed and only its
+  // platform binary is absent — telling that operator to install again sends
+  // them round a loop they have already been round. So lead with what actually
+  // threw.
   console.error(
-    "build-icons: sharp is not installed. It is a devDependency — run the " +
-      "package manager's install before building.",
+    `build-icons: could not load sharp — ${err?.message ?? err}. It is a ` +
+      "devDependency: run the package manager's install if it is missing, or " +
+      "reinstall to fetch this platform's binary if it resolved but its " +
+      "native binding would not load.",
   );
   process.exit(1);
 }
