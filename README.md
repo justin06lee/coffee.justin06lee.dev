@@ -17,11 +17,49 @@ bun run build
 | `src/lib/time.ts` | timezone primitives — instants, date keys, minutes past midnight |
 | `src/lib/availability.ts` | pure slot engine: rules + overrides + busy → bookable instants |
 | `src/lib/bookings.ts` | commit path, availability queries, admin stats |
+| `src/lib/page-data.ts` | one batched read per route — see below |
 | `src/lib/db.ts` | schema for the `coffee_*` tables |
 | `src/components/chrome/` | vendored chrome components — owned code, edit freely |
 | `src/app/[slug]/` | the public booking flow |
 | `src/app/admin/` | availability, meeting types, bookings |
 | `design/favicon/` | the icon generator and its SVG output |
+
+## one round trip per page
+
+Every request this app serves is bounded by round trips to Turso — there are no
+other backends — so the number of *sequential* `db.execute` hops is the latency
+budget. `db.batch` sends a whole array of statements in one HTTP request, so
+each route asks for everything it renders at once, through a loader in
+`src/lib/page-data.ts`:
+
+| route | statements | round trips |
+|---|---|---|
+| `/` | settings + meeting types | 1 |
+| `/[slug]` | type + settings + rules + overrides + busy | 1 (+1 for `generateMetadata`) |
+| `/booked/[token]`, `/api/ics/[token]` | booking + settings + types | 1 |
+| `/admin` | stats + two booking lists + settings + types | 1 |
+
+To keep that shape, reads in `settings.ts`, `schedule.ts`, `event-types.ts` and
+`bookings.ts` are each split into an exported statement and a pure row mapper.
+A loader composes the statements it needs into one batch and maps the result
+sets itself; the plain `getSettings()`-style functions are thin wrappers over
+the same pair, for callers with nothing to batch against. Adding a read to a
+page means adding its statement to that page's batch — not another `await`.
+
+Those wrappers are also memoized per request with React's `cache()`, which is
+only sound while nothing reads a value and then writes it inside one request —
+a server action and the re-render that follows it share one. Each file says so
+where the memo is defined; a new read-then-write action must not read through
+them.
+
+`/[slug]` would need a second hop to learn its event type's booking horizon
+before it could query the busy window, so it queries a deliberate superset
+instead (`MAX_HORIZON_DAYS`). Over-fetching busy intervals is safe because they
+only ever narrow availability, through an overlap test and a same-day count,
+both of which ignore intervals outside the horizon.
+
+Nothing is cached *across* requests: every page is `force-dynamic`, and a stale
+slot is worse than a slow one.
 
 ## the icon
 
