@@ -3,6 +3,7 @@
 import { useActionState, useMemo, useState, useSyncExternalStore } from "react";
 import { Clock, MapPin, User } from "lucide-react";
 import { bookSlot, type BookFormState } from "@/app/actions";
+import { WEEKDAY_SHORT } from "@/lib/availability";
 import { Button } from "@/components/chrome/button";
 import { Callout } from "@/components/chrome/callout";
 import { DateStrip } from "@/components/chrome/date-strip";
@@ -44,8 +45,6 @@ const STEPS = [
   { label: "time", description: "pick a slot" },
   { label: "details", description: "who you are" },
 ];
-
-const WEEKDAY_SHORT = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
 
 /**
  * The guest-facing booking flow.

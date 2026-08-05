@@ -96,18 +96,28 @@ first-run content (weekday 9–5 hours, three meeting types) only into genuinely
 empty tables.
 
 ```bash
-# apply the schema and print what came back
-bun --conditions=react-server run scripts/db-check.ts
+# print what's in the database; pass --apply to create and seed the tables
+bun run db:check
 
 # book the next open slot, assert it disappears, then clean up after itself
-bun --conditions=react-server run scripts/smoke-booking.ts
+bun run smoke -- --yes-write-to-real-db
 ```
 
-The `--conditions=react-server` flag is required: the lib modules import
-`server-only`, which throws unless the resolver picks its react-server entry
-the way Next does.
+Both go through `package.json` rather than being invoked directly, because the
+`--conditions=react-server` flag they carry is load-bearing and easy to forget:
+the lib modules import `server-only`, which throws unless the resolver picks
+its react-server entry the way Next does.
+
+`smoke` writes to whatever `TURSO_DATABASE_URL` points at, and `bun` auto-loads
+`.env` — so against the shared database it books a real slot. It refuses to run
+without `--yes-write-to-real-db` unless the URL is a local `file:` one, and it
+cleans up in a `finally` so an interrupted run can't leave a confirmed booking
+squatting on the host's next opening.
 
 ### env
+
+`cp .env.example .env` and fill it in — the template carries the names and the
+notes, never a value.
 
 ```
 TURSO_DATABASE_URL=
@@ -122,6 +132,11 @@ misconfigured deploy fails per-request naming the variable it wants, instead of
 failing the build with `URL_INVALID: The URL 'undefined' is not in a valid
 format`. A missing `ADMIN_KEY` disables admin login and warns once rather than
 throwing, so the public booking flow stays up.
+
+One asymmetry worth knowing: `NEXT_PUBLIC_SITE_URL` is inlined at *build* time,
+not read at runtime like the other three. Setting it only in the runtime
+environment has no effect — it has to be present when `next build` runs, or the
+hardcoded `https://coffee.justin06lee.dev` fallback ships instead.
 
 ## admin
 

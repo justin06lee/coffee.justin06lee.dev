@@ -78,7 +78,7 @@ export default async function Home() {
                         </Badge>
                         <Badge className="gap-1">
                           <MapPin aria-hidden className="size-3" strokeWidth={1.5} />
-                          {eventType.locationDetail || eventType.location}
+                          {eventType.locationDetail || settings.defaultLocation}
                         </Badge>
                       </span>
                     </span>

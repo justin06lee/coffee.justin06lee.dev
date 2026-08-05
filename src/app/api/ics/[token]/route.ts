@@ -29,8 +29,10 @@ export async function GET(
   ]);
 
   const title = eventType?.title ?? "meeting";
-  const location =
-    eventType?.locationDetail || eventType?.location || settings.defaultLocation;
+  // Same chain as the confirmation page, and for the same reason: the coarse
+  // `location` category always has a value, so including it put the literal
+  // word "video" in the invite instead of the host's default.
+  const location = eventType?.locationDetail || settings.defaultLocation;
 
   const ics = buildIcs({
     uid: `${booking.id}@coffee.justin06lee.dev`,

@@ -59,7 +59,9 @@ export default async function BookingPage({ params }: Props) {
               title: eventType.title,
               blurb: eventType.blurb,
               durationMin: eventType.durationMin,
-              location: eventType.locationDetail || eventType.location,
+              // Falls back to the host default, not to the coarse `location`
+              // category — see the note on the confirmation page.
+              location: eventType.locationDetail || settings.defaultLocation,
             }}
             hostName={settings.hostName}
             hostTimeZone={settings.timeZone}

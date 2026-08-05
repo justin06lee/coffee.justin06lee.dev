@@ -44,10 +44,20 @@ export type DateOverride = {
   endMin: number | null;
 };
 
-/** An occupied stretch of absolute time, buffers already applied. */
+/**
+ * An occupied stretch of absolute time, buffers already applied.
+ *
+ * `start`/`end` are the *guarded* span — the booking widened by its event
+ * type's buffers — and are what overlap checks read. `eventStart` is the
+ * booking's own instant, which answers a different question: the daily limit
+ * counts meetings on a host-local day, and a lead-in buffer that reaches back
+ * over local midnight must not drag the meeting into the previous day with it.
+ * One field could only ever have served one of the two.
+ */
 export type BusyInterval = {
   start: number;
   end: number;
+  eventStart: number;
 };
 
 export type SlotOptions = {
@@ -177,6 +187,17 @@ export function slotsForDate(
       const start = zonedTimeToInstant(dateKey, startMin, timeZone);
       const end = start + durationMin * 60_000;
 
+      // A day's list only ever contains that day. `isSlotBookable` re-derives
+      // the day from the instant it is handed, so any slot whose instant reads
+      // as a different date key is one the generator offers and the committer
+      // can never find — offered forever, bookable never. Zones that spring
+      // forward at midnight (Havana, Santiago, Asunción, the Azores) are where
+      // that bites: local 00:00 doesn't exist, and the instant naming it can
+      // land on the previous day. This is the self-consistency invariant
+      // between the two functions rather than a patch on the conversion, so it
+      // stays right whatever an impossible wall time resolves to.
+      if (dateKeyInTimeZone(start, timeZone) !== dateKey) continue;
+
       if (start < earliest) continue;
 
       // The guarded span includes this event's own buffers; the busy intervals
@@ -201,7 +222,11 @@ function countBookingsOnDate(
   timeZone: string,
   busy: BusyInterval[],
 ): number {
-  return busy.filter((b) => dateKeyInTimeZone(b.start, timeZone) === dateKey).length;
+  // `eventStart`, not `start`: the guard span is buffer-widened, and counting
+  // on it books a meeting held just after local midnight against the day
+  // before — closing a day nothing happens on and leaving the real one open.
+  return busy.filter((b) => dateKeyInTimeZone(b.eventStart, timeZone) === dateKey)
+    .length;
 }
 
 export type DayAvailability = {
@@ -209,7 +234,26 @@ export type DayAvailability = {
   slots: number[];
 };
 
-/** `slotsForDate` across an inclusive span, for the month/strip views. */
+/**
+ * The most days one `slotsForRange` call will walk.
+ *
+ * The booking horizon is clamped to 365 days where an event type is saved, so
+ * the widest span any real caller asks for is today plus a year — 366 entries.
+ * 400 leaves room for a caller that pads the ends without leaving room for the
+ * pathological case: a span of `0001-01-01`..`9999-12-31` is 2.9M days of
+ * `Intl` formatting, measured at minutes of CPU and hundreds of megabytes.
+ */
+export const MAX_RANGE_DAYS = 400;
+
+/**
+ * `slotsForDate` across an inclusive span, for the month/strip views.
+ *
+ * Throws past `MAX_RANGE_DAYS` rather than truncating. A short list is
+ * indistinguishable from a quiet calendar at every call site — the page would
+ * render as if it had the whole horizon — so an over-wide span has to be loud
+ * where it happens, and callers taking a span from user input are expected to
+ * bound it themselves (see `availabilityFor`).
+ */
 export function slotsForRange(
   start: DateKey,
   end: DateKey,
@@ -219,6 +263,12 @@ export function slotsForRange(
   busy: BusyInterval[],
 ): DayAvailability[] {
   const span = daysBetweenDateKeys(start, end);
+  if (span + 1 > MAX_RANGE_DAYS) {
+    throw new RangeError(
+      `slotsForRange: ${start}..${end} is ${span + 1} days, over the ` +
+        `${MAX_RANGE_DAYS}-day cap. bound the span before calling.`,
+    );
+  }
   const out: DayAvailability[] = [];
   for (let i = 0; i <= span; i += 1) {
     const date = addDaysToDateKey(start, i);

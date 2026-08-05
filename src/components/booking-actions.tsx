@@ -51,57 +51,58 @@ export function BookingActions({ token, past, event }: BookingActionsProps) {
     );
   }
 
+  // A past booking has nothing to add to a calendar and nothing left to
+  // cancel, so the component owes the page nothing at all — the wrapper alone
+  // was still spending its margin.
+  if (past) return null;
+
   return (
     <div className="mt-6 flex flex-col gap-6">
-      {!past ? (
-        <div className="flex flex-col gap-2">
-          <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-white/40">
-            put it on your calendar
-          </span>
-          <AddToCalendar
-            event={event}
-            icsHref={`/api/ics/${token}`}
-            targets={["google", "outlook", "office", "ics"]}
-          />
-        </div>
-      ) : null}
+      <div className="flex flex-col gap-2">
+        <span className="font-mono text-[11px] uppercase tracking-[0.18em] text-white/40">
+          put it on your calendar
+        </span>
+        <AddToCalendar
+          event={event}
+          icsHref={`/api/ics/${token}`}
+          targets={["google", "outlook", "office", "ics"]}
+        />
+      </div>
 
-      {!past ? (
-        <div className="border-t border-white/10 pt-6">
-          {!confirming ? (
-            <Button variant="ghost" onClick={() => setConfirming(true)}>
-              cancel this booking
-            </Button>
-          ) : (
-            <form action={formAction} className="flex flex-col gap-4">
-              <input type="hidden" name="token" value={token} />
-              <Field label="cancelling — anything to say?" optional>
-                {(props) => (
-                  <Textarea
-                    {...props}
-                    name="reason"
-                    rows={2}
-                    placeholder="something came up"
-                  />
-                )}
-              </Field>
-              {state.error ? (
-                <Callout variant="danger" title="couldn't cancel">
-                  {state.error}
-                </Callout>
-              ) : null}
-              <div className="flex flex-wrap items-center gap-3">
-                <Button type="submit" variant="outline" disabled={pending}>
-                  {pending ? "cancelling…" : "yes, cancel it"}
-                </Button>
-                <Button variant="ghost" onClick={() => setConfirming(false)}>
-                  keep it
-                </Button>
-              </div>
-            </form>
-          )}
-        </div>
-      ) : null}
+      <div className="border-t border-white/10 pt-6">
+        {!confirming ? (
+          <Button variant="ghost" onClick={() => setConfirming(true)}>
+            cancel this booking
+          </Button>
+        ) : (
+          <form action={formAction} className="flex flex-col gap-4">
+            <input type="hidden" name="token" value={token} />
+            <Field label="cancelling — anything to say?" optional>
+              {(props) => (
+                <Textarea
+                  {...props}
+                  name="reason"
+                  rows={2}
+                  placeholder="something came up"
+                />
+              )}
+            </Field>
+            {state.error ? (
+              <Callout variant="danger" title="couldn't cancel">
+                {state.error}
+              </Callout>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-3">
+              <Button type="submit" variant="outline" disabled={pending}>
+                {pending ? "cancelling…" : "yes, cancel it"}
+              </Button>
+              <Button variant="ghost" onClick={() => setConfirming(false)}>
+                keep it
+              </Button>
+            </div>
+          </form>
+        )}
+      </div>
     </div>
   );
 }

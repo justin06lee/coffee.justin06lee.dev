@@ -128,7 +128,9 @@ export async function saveHostSettings(formData: FormData): Promise<void> {
     // An unrecognised zone would make every slot computation throw, so it is
     // dropped rather than stored.
     ...(isValidTimeZone(timeZone) ? { timeZone } : {}),
-    bookingsOpen: formData.get("bookingsOpen") === "on",
+    // "1"/"0" rather than a checkbox's "on": the form sends a hidden input, so
+    // the flag is always present and matches how settings stores it.
+    bookingsOpen: formData.get("bookingsOpen") === "1",
     closedMessage: String(formData.get("closedMessage") ?? "").trim().slice(0, 300),
   });
   revalidatePath("/", "layout");
@@ -137,25 +139,39 @@ export async function saveHostSettings(formData: FormData): Promise<void> {
 /* ── event types ── */
 
 function parseEventType(formData: FormData): EventTypeInput | null {
-  const title = String(formData.get("title") ?? "").trim();
+  const text = (key: string) => {
+    const raw = formData.get(key);
+    return typeof raw === "string" ? raw.trim() : "";
+  };
+
+  const title = text("title");
   if (!title) return null;
 
-  const rawSlug = String(formData.get("slug") ?? "").trim();
-  const slug = slugify(rawSlug || title);
+  const slug = slugify(text("slug") || title);
   if (!slug) return null;
 
+  // A cleared <input type="number"> submits "", and Number("") is 0 — finite,
+  // so anything that reaches for the number first clamps a blank field to `min`
+  // instead of falling back. Clearing "horizon" to get the default back would
+  // have set it to 1 day and collapsed the public page to a single bookable
+  // date, so blank has to mean "unanswered" before any arithmetic sees it.
   const int = (key: string, fallback: number, min: number, max: number) => {
-    const value = Number(formData.get(key));
+    const raw = text(key);
+    if (!raw) return fallback;
+    const value = Number(raw);
     if (!Number.isFinite(value)) return fallback;
     return Math.min(max, Math.max(min, Math.round(value)));
   };
 
-  const dailyLimitRaw = Number(formData.get("dailyLimit"));
+  // dailyLimit reads a blank the other way round on purpose: the field is
+  // documented as "blank for no cap", so absent means null, not a default.
+  const dailyLimitText = text("dailyLimit");
+  const dailyLimitRaw = dailyLimitText ? Number(dailyLimitText) : Number.NaN;
 
   return {
     slug,
     title: title.slice(0, 80),
-    blurb: String(formData.get("blurb") ?? "").trim().slice(0, 300) || null,
+    blurb: text("blurb").slice(0, 300) || null,
     durationMin: int("durationMin", 30, 5, 8 * 60),
     incrementMin: int("incrementMin", 15, 5, 4 * 60),
     bufferBeforeMin: int("bufferBeforeMin", 0, 0, 4 * 60),
@@ -166,10 +182,10 @@ function parseEventType(formData: FormData): EventTypeInput | null {
       Number.isFinite(dailyLimitRaw) && dailyLimitRaw > 0
         ? Math.round(dailyLimitRaw)
         : null,
-    location: String(formData.get("location") ?? "video").trim().slice(0, 40) || "video",
-    locationDetail:
-      String(formData.get("locationDetail") ?? "").trim().slice(0, 200) || null,
-    active: formData.get("active") === "on",
+    location: text("location").slice(0, 40) || "video",
+    locationDetail: text("locationDetail").slice(0, 200) || null,
+    // Same hidden-input encoding as bookingsOpen — see saveHostSettings.
+    active: text("active") === "1",
   };
 }
 

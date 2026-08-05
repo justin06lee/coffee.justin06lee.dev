@@ -74,7 +74,40 @@ export async function getEventType(id: string): Promise<EventType | null> {
 
 export type EventTypeInput = Omit<EventType, "id" | "position">;
 
-export async function createEventType(input: EventTypeInput): Promise<string> {
+/**
+ * Ceiling on either buffer, in minutes.
+ *
+ * This is not a taste judgement, it is what keeps the availability query
+ * correct. `busyBetween` widens its window by one day either side so a booking
+ * whose trailing buffer reaches into the span is still caught, and that pad
+ * only covers the worst case while `maxZoneOffset + maxBuffer` stays under 24h.
+ * Zones run to ±14h, which leaves 10h; four is comfortably inside it.
+ *
+ * The admin form already clamps to this, but a clamp in a form is a clamp on
+ * one caller. Enforcing it here means the invariant holds for the seed, for the
+ * scripts, and for whatever writes to this table next.
+ */
+const MAX_BUFFER_MIN = 4 * 60;
+
+function clampInput(input: EventTypeInput): EventTypeInput {
+  const clamp = (value: number, min: number, max: number) =>
+    Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : min;
+
+  return {
+    ...input,
+    durationMin: clamp(input.durationMin, 5, 8 * 60),
+    incrementMin: clamp(input.incrementMin, 5, 4 * 60),
+    bufferBeforeMin: clamp(input.bufferBeforeMin, 0, MAX_BUFFER_MIN),
+    bufferAfterMin: clamp(input.bufferAfterMin, 0, MAX_BUFFER_MIN),
+    minNoticeMin: clamp(input.minNoticeMin, 0, 60 * 24 * 30),
+    maxDaysAhead: clamp(input.maxDaysAhead, 1, 365),
+    dailyLimit:
+      input.dailyLimit === null ? null : Math.max(1, Math.round(input.dailyLimit)),
+  };
+}
+
+export async function createEventType(rawInput: EventTypeInput): Promise<string> {
+  const input = clampInput(rawInput);
   await initDb();
   const now = Date.now();
   const id = crypto.randomUUID();
@@ -113,8 +146,9 @@ export async function createEventType(input: EventTypeInput): Promise<string> {
 
 export async function updateEventType(
   id: string,
-  input: EventTypeInput,
+  rawInput: EventTypeInput,
 ): Promise<void> {
+  const input = clampInput(rawInput);
   await initDb();
   await db.execute({
     sql: `UPDATE coffee_event_types SET
@@ -165,17 +199,6 @@ export async function deleteEventType(
   }
   await db.execute({ sql: "DELETE FROM coffee_event_types WHERE id = ?", args: [id] });
   return { ok: true };
-}
-
-export async function reorderEventTypes(idsInOrder: string[]): Promise<void> {
-  await initDb();
-  const now = Date.now();
-  await db.batch(
-    idsInOrder.map((id, index) => ({
-      sql: "UPDATE coffee_event_types SET position = ?, updated_at = ? WHERE id = ?",
-      args: [index, now, id],
-    })),
-  );
 }
 
 /** URL-safe, lowercase, collapsed — the shape the booking route expects. */

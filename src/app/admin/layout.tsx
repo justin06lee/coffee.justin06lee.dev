@@ -49,6 +49,16 @@ export default async function AdminLayout({
         ))}
       </nav>
 
+      {/*
+        Every page in this segment opens at h2, and the layout contributed no
+        heading — so the admin screens started their outline a level down and
+        heading navigation skipped a rung on all three. The pages are
+        distinguished by the breadcrumb and the document title; what was
+        missing is the rung itself, not a second visible title, so this is
+        sr-only rather than a design change.
+      */}
+      <h1 className="sr-only">admin</h1>
+
       <main className="mx-auto w-full max-w-4xl flex-1 px-5 py-10 sm:px-8">{children}</main>
     </div>
   );

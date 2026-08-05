@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { ExternalLink, Mail } from "lucide-react";
 import { adminCancelBooking } from "@/app/admin/actions";
 import { Badge } from "@/components/chrome/badge";
@@ -92,8 +93,13 @@ function BookingRow({
 
           <span className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px] text-white/50">
             <span className="text-white/70">{booking.guestName}</span>
+            {/* The address is guest-supplied and the booking regex allows
+                `?` and `&`, so pasting it raw would let someone register
+                `x@evil.com?bcc=…` and pick the headers of the compose window
+                the host opens. Encoding kills the query string; the visible
+                text stays the plain address. */}
             <a
-              href={`mailto:${booking.guestEmail}`}
+              href={`mailto:${encodeURIComponent(booking.guestEmail)}`}
               className="flex items-center gap-1 transition-colors hover:text-white"
             >
               <Mail aria-hidden className="size-3" strokeWidth={1.5} />
@@ -106,14 +112,20 @@ function BookingRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
+          {/* `label` is only read for icon-only buttons, so on a button with
+              text it was dropped and every row announced a bare "view". The
+              name has to come from the children instead — the guest's name is
+              what tells the rows apart. `linkComponent` keeps the hop
+              client-side; without it the button falls back to a plain <a>. */}
           <Button
             size="sm"
             variant="ghost"
             href={`/booked/${booking.cancelToken}`}
+            linkComponent={Link}
             iconRight={ExternalLink}
-            label="open the guest's view"
           >
-            view
+            view{" "}
+            <span className="sr-only">{booking.guestName}&apos;s booking</span>
           </Button>
           {cancellable && !cancelled ? (
             <Button size="sm" variant="ghost" onClick={() => setConfirming((c) => !c)}>
@@ -159,6 +171,10 @@ function BookingRow({
                 startTransition(async () => {
                   await adminCancelBooking(booking.id, reason);
                   setConfirming(false);
+                  // The panel is reopened from the same state, so a reason
+                  // left behind would come back pre-filled on the next
+                  // booking the host looks at.
+                  setReason("");
                 })
               }
             >
@@ -170,6 +186,14 @@ function BookingRow({
           </div>
         </div>
       ) : null}
+
+      {/* The cancel round trip only shows itself as a word on a button and,
+          once the page revalidates, a struck-through row — neither of which a
+          screen reader announces. This sits outside the confirm panel so it
+          outlives it and can still report the outcome. */}
+      <span aria-live="polite" role="status" className="sr-only">
+        {pending ? "cancelling…" : cancelled ? "booking cancelled." : ""}
+      </span>
     </li>
   );
 }
