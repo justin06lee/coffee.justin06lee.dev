@@ -209,6 +209,20 @@ export async function availabilityFor(
   };
 }
 
+/**
+ * Extra reach on the near side of the busy window, so it provably contains the
+ * whole host-local day at that end of it.
+ *
+ * The daily limit is counted over that day, and a day is not always 24 hours:
+ * on a fall-back it is 25. A window measured from an instant rather than from
+ * the day's own midnight therefore misses same-day bookings once that instant
+ * sits more than 24 hours into a long day — the count comes up short, and the
+ * limit is walked straight past. `busyStatement` already pads a day either
+ * side; two more hours covers the longest transition any zone applies, with
+ * room for the half-hour ones.
+ */
+const DAY_SLACK_MS = 2 * 60 * 60_000;
+
 /** Widest busy window any event type can need: maxDaysAhead is capped at 365. */
 export const MAX_HORIZON_DAYS = 366;
 
@@ -216,9 +230,19 @@ export const MAX_HORIZON_DAYS = 366;
  * Busy intervals covering the whole horizon, for a page that batches before it
  * knows the event type's maxDaysAhead. Over-fetching is safe for the same
  * reason the superset window in `createBooking` is — see the comment there.
+ *
+ * The near edge carries `DAY_SLACK_MS` for the same reason the commit path
+ * does. This window is measured from `now`, and the horizon's first day is the
+ * host-local day `now` falls in, which on a fall-back is 25 hours long — so a
+ * page loaded late in such a day would otherwise count that day's earliest
+ * bookings as absent and offer a slot over the limit that `createBooking`,
+ * which pads correctly, would then refuse.
  */
 export function horizonBusyStatement(now: number): InStatement {
-  return busyStatement(now, now + MAX_HORIZON_DAYS * 24 * 60 * 60_000);
+  return busyStatement(
+    now - DAY_SLACK_MS,
+    now + MAX_HORIZON_DAYS * 24 * 60 * 60_000,
+  );
 }
 
 /**
@@ -263,19 +287,6 @@ export type BookingInput = {
  * built before the event type's duration is known.
  */
 const MAX_MEETING_MS = 24 * 60 * 60_000;
-
-/**
- * Extra reach on the near side of the busy window, so it provably contains the
- * whole host-local day the slot sits on.
- *
- * The daily limit is counted over that day, and a day is not always 24 hours:
- * on a fall-back it is 25. A window measured from the slot alone therefore
- * misses same-day bookings when the slot sits near the far end of a long day —
- * the count comes up short, and posting a slot directly walks past the limit.
- * `busyStatement` already pads a day either side; two more hours covers the
- * longest transition any zone applies, with room for the half-hour ones.
- */
-const DAY_SLACK_MS = 2 * 60 * 60_000;
 
 /**
  * Commit a booking, re-deriving availability from the rules rather than
