@@ -80,26 +80,54 @@ export function wallClockInTimeZone(instant: number, timeZone: string): WallCloc
  */
 export function timeZoneOffsetMs(instant: number, timeZone: string): number {
   const w = wallClockInTimeZone(instant, timeZone);
-  const asUtc = Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second);
+  const asUtc =
+    utcMsFromDateParts(w.year, w.month, w.day) +
+    w.hour * 3_600_000 +
+    w.minute * 60_000 +
+    w.second * 1_000;
   // `instant`'s own sub-second part isn't in `asUtc`; drop it from both sides
   // so the difference is a whole number of minutes as offsets always are.
   return asUtc - Math.floor(instant / 1000) * 1000;
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Convert a wall-clock reading in `timeZone` to the instant it names.
  *
- * Two passes, because the offset we need depends on the answer we're computing.
- * Pass one guesses the offset by treating the wall time as UTC; pass two
- * re-reads the offset at the corrected instant and, if a DST boundary sits
- * between the two, corrects again.
+ * A wall time can't be converted without an offset, and the offset can't be
+ * read without an instant, so the offset is bracketed instead of guessed: read
+ * it a day either side of the naive reading. tzdb never changes a zone's offset
+ * twice inside 48 hours, so those two readings are the only offsets that can
+ * apply here, and a day is comfortably wider than the largest offset in use
+ * (+14:00) so every candidate instant falls inside the bracket. When they
+ * agree — every wall time except the two days a year a zone shifts — the
+ * conversion is one subtraction and we're done.
  *
- * Ambiguity at DST boundaries is resolved, not signalled: in the repeated hour
- * of a fall-back this returns the *first* (pre-transition) occurrence, and in
- * the skipped hour of a spring-forward it returns the instant the wall clock
- * jumps to. Availability windows that straddle a transition therefore stay
- * contiguous rather than opening a hole or a duplicate — the behaviour a
- * booking page wants, and the reason this doesn't throw.
+ * When they disagree a transition is nearby and the wall time has zero, one or
+ * two instants. Ambiguity is resolved, not signalled, because a booking page
+ * wants a window straddling a transition to stay contiguous rather than open a
+ * hole or a duplicate:
+ *
+ *   - **repeated (fall-back)** — both candidates round-trip; this returns the
+ *     *first*, pre-transition occurrence, so the earlier of the two.
+ *   - **skipped (spring-forward)** — neither candidate round-trips; this
+ *     returns the instant the wall clock jumped to, which is the first instant
+ *     that exists at or after the time asked for.
+ *
+ * Snapping a skipped time to the transition rather than sliding it on by the
+ * width of the gap is what keeps the answer inside the window the caller was
+ * asking about: a host free 01:00-03:00 on a spring-forward day gets slots up
+ * to the jump and no further, instead of gaining 03:15 out of nowhere. It costs
+ * duplicates — every skipped time collapses onto the same instant — but a day
+ * has more wall-clock readings than instants on a day like that, so some
+ * collision is forced; what matters is that walking a day never goes backwards.
+ *
+ * The result reads back on the requested `dateKey` — never the day before, the
+ * bug this replaced — with one exception no instant could satisfy: a gap that
+ * runs past local midnight, where the next real instant is on the following day
+ * by definition. America/Nuuk and America/Scoresbysund spring forward at 23:00
+ * and are the only zones still doing it; Pacific/Apia skipped 2011-12-30 whole.
  */
 export function zonedTimeToInstant(
   dateKey: DateKey,
@@ -112,10 +140,56 @@ export function zonedTimeToInstant(
   const hour = Math.floor(withinDay / 60);
   const minute = withinDay % 60;
 
-  const naive = Date.UTC(year, month - 1, day + dayOffset, hour, minute);
-  const firstGuess = naive - timeZoneOffsetMs(naive, timeZone);
-  const refined = naive - timeZoneOffsetMs(firstGuess, timeZone);
-  return refined;
+  const naive =
+    utcMsFromDateParts(year, month, day + dayOffset) +
+    hour * 3_600_000 +
+    minute * 60_000;
+
+  const offsetBefore = timeZoneOffsetMs(naive - DAY_MS, timeZone);
+  const offsetAfter = timeZoneOffsetMs(naive + DAY_MS, timeZone);
+  const asBefore = naive - offsetBefore;
+  if (offsetBefore === offsetAfter) return asBefore;
+
+  // Preferring the pre-transition reading whenever it survives the round trip
+  // does double duty: it is simply the right answer for a wall time that falls
+  // before the transition, and in a fall-back repeat — where both readings
+  // survive — it is the earlier of the two, which is the documented choice.
+  if (timeZoneOffsetMs(asBefore, timeZone) === offsetBefore) return asBefore;
+  const asAfter = naive - offsetAfter;
+  if (timeZoneOffsetMs(asAfter, timeZone) === offsetAfter) return asAfter;
+
+  // Neither survives, so this wall time never happened. The gap it fell into is
+  // bracketed by the two candidates — `asAfter` sits before the transition and
+  // `asBefore` at or after it — so the jump itself is findable between them.
+  return transitionBetween(asAfter, asBefore, offsetAfter, timeZone);
+}
+
+/**
+ * The instant a spring-forward jump happened, given a bracket around it.
+ * Bisected, because `Intl` will answer "what is the offset at this instant" and
+ * nothing else — there is no way to ask when the offset last changed. The
+ * bracket is the width of the gap and transitions land on a whole minute, so
+ * this is a bounded handful of reads, and it only runs for a wall time that
+ * doesn't exist: never on the path a normal slot takes.
+ */
+function transitionBetween(
+  before: number,
+  after: number,
+  offsetAfter: number,
+  timeZone: string,
+): number {
+  let lo = before;
+  let hi = after;
+  while (hi - lo > 60_000) {
+    // Step in whole minutes from `lo` so the answer lands on the same minute
+    // grid the transition does, and never below one minute so this terminates
+    // even if some historical offset makes the bracket a ragged length.
+    const step = Math.max(60_000, Math.floor((hi - lo) / 120_000) * 60_000);
+    const mid = lo + step;
+    if (timeZoneOffsetMs(mid, timeZone) === offsetAfter) hi = mid;
+    else lo = mid;
+  }
+  return hi;
 }
 
 /** The calendar day `instant` falls on, as read in `timeZone`. */
@@ -130,10 +204,39 @@ export function minutesInTimeZone(instant: number, timeZone: string): number {
   return w.hour * 60 + w.minute;
 }
 
+/**
+ * Midnight UTC on a calendar date, with `Date.UTC`'s two-digit-year rule undone.
+ * `Date.UTC(50, …)` means 1950, so a year-50 date key would silently become a
+ * 20th-century one; `setUTCFullYear` is the only way to name years 0-99
+ * literally. Setting year, month and day in one call matters — rolling the day
+ * over first and correcting the year afterwards would resolve 0000-02-29
+ * against 1900, which isn't a leap year, and lose the day.
+ */
+function utcMsFromDateParts(year: number, month: number, day: number): number {
+  if (year >= 0 && year < 100) {
+    const d = new Date(0);
+    d.setUTCFullYear(year, month - 1, day);
+    return d.getTime();
+  }
+  return Date.UTC(year, month - 1, day);
+}
+
 export function formatDateKey(year: number, month: number, day: number): DateKey {
+  // The year is padded for the same reason the month and day are: `parseDateKey`
+  // and every caller's validation want exactly four digits, so year 100 has to
+  // come back as "0100" or a valid key in stops yielding a valid key out.
+  //
+  // A year outside 0-9999 has no key at all, and this stays total rather than
+  // throwing for it: `availabilityFor` walks deliberately off the end of the
+  // calendar and leans on `isValidDateKey` rejecting what comes back, which an
+  // exception would turn into a 500 on a public page. Leaving such a year
+  // unpadded is what keeps it rejectable — "10000-01-01" and "-1-11-28" both
+  // fail the key pattern, where a padded "00-1-11-28" reads like a near miss.
+  const inRange = Number.isInteger(year) && year >= 0 && year <= 9999;
+  const yyyy = inRange ? String(year).padStart(4, "0") : String(year);
   const mm = String(month).padStart(2, "0");
   const dd = String(day).padStart(2, "0");
-  return `${year}-${mm}-${dd}`;
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 export function parseDateKey(dateKey: DateKey): {
@@ -155,7 +258,7 @@ export function isValidDateKey(value: string): value is DateKey {
   const { year, month, day } = parseDateKey(value);
   // Round-trip through UTC to reject 2026-02-30 and friends, which `Date.UTC`
   // would silently roll forward into March.
-  const utc = new Date(Date.UTC(year, month - 1, day));
+  const utc = new Date(utcMsFromDateParts(year, month, day));
   return (
     utc.getUTCFullYear() === year &&
     utc.getUTCMonth() === month - 1 &&
@@ -170,7 +273,7 @@ export function isValidDateKey(value: string): value is DateKey {
  */
 export function addDaysToDateKey(dateKey: DateKey, days: number): DateKey {
   const { year, month, day } = parseDateKey(dateKey);
-  const shifted = new Date(Date.UTC(year, month - 1, day + days));
+  const shifted = new Date(utcMsFromDateParts(year, month, day + days));
   return formatDateKey(
     shifted.getUTCFullYear(),
     shifted.getUTCMonth() + 1,
@@ -181,7 +284,7 @@ export function addDaysToDateKey(dateKey: DateKey, days: number): DateKey {
 /** Weekday of a date key, 0 = Sunday. Zone-independent: a date key *is* a day. */
 export function weekdayOfDateKey(dateKey: DateKey): Weekday {
   const { year, month, day } = parseDateKey(dateKey);
-  return new Date(Date.UTC(year, month - 1, day)).getUTCDay() as Weekday;
+  return new Date(utcMsFromDateParts(year, month, day)).getUTCDay() as Weekday;
 }
 
 /** Whole days from `from` to `to`, signed. */
@@ -189,8 +292,8 @@ export function daysBetweenDateKeys(from: DateKey, to: DateKey): number {
   const a = parseDateKey(from);
   const b = parseDateKey(to);
   const ms =
-    Date.UTC(b.year, b.month - 1, b.day) - Date.UTC(a.year, a.month - 1, a.day);
-  return Math.round(ms / 86_400_000);
+    utcMsFromDateParts(b.year, b.month, b.day) - utcMsFromDateParts(a.year, a.month, a.day);
+  return Math.round(ms / DAY_MS);
 }
 
 /** Inclusive range of date keys. */
